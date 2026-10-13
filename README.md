@@ -51,8 +51,19 @@ instead of a second one.
 
 ## Getting started
 
-1. Install the extension. From a checkout: `code --install-extension` on a
-   packaged `.vsix` (`npx @vscode/vsce package`), or for development open this
+1. Install the extension. From a checkout, the simplest is to link VS Code
+   to it, so it runs from the checkout and a window reload picks up changes
+   (nothing to build or install first). On Windows, in PowerShell:
+
+   ```powershell
+   .\scripts\link-extension.ps1        # -Insiders for VS Code Insiders, -Remove to undo
+   ```
+
+   which makes a junction in `%USERPROFILE%\.vscode\extensions`. On macOS or
+   Linux, a symlink does the same:
+   `ln -s "$PWD" ~/.vscode/extensions/jonsole.bbc-micro-debug-0.1.0`.
+   Then restart VS Code. Or install a packaged `.vsix`
+   (`npx @vscode/vsce package`, then `code --install-extension`), or open this
    folder and press F5 ("Run Extension").
 2. Open `examples/hello` and press F5. The prebuilt disc boots, prints its
    message five times, and stops at any breakpoint you set in `hello.6502`.
