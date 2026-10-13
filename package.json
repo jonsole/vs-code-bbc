@@ -314,61 +314,332 @@
     ],
     "commands": [
       {
-        "command": "bbcMicro.showScreen",
-        "title": "Show Screen",
-        "category": "BBC Micro",
-        "icon": "$(device-desktop)"
-      },
-      {
-        "command": "bbcMicro.showScreenOf",
-        "title": "Show Screen of…",
-        "category": "BBC Micro",
-        "icon": "$(device-desktop)"
-      },
-      {
-        "command": "bbcMicro.runFile",
-        "title": "Run on the BBC Micro",
-        "category": "BBC Micro",
-        "icon": "$(play)"
-      },
-      {
-        "command": "bbcMicro.debugFile",
-        "title": "Debug on the BBC Micro",
-        "category": "BBC Micro",
-        "icon": "$(debug-alt)"
-      },
-      {
-        "command": "bbcMicro.typeText",
-        "title": "Type Text at the Keyboard…",
-        "category": "BBC Micro"
-      },
-      {
         "command": "bbcMicro.serverStart",
-        "title": "Start the Emulator",
+        "title": "Start Emulator",
         "category": "BBC Micro"
       },
       {
         "command": "bbcMicro.serverStop",
-        "title": "Stop the Emulator",
+        "title": "Stop Emulator",
         "category": "BBC Micro"
       },
       {
         "command": "bbcMicro.serverRestart",
-        "title": "Restart the Emulator",
+        "title": "Restart Emulator",
         "category": "BBC Micro"
       },
       {
         "command": "bbcMicro.serverLog",
-        "title": "Show the Emulator's Log",
+        "title": "Show Emulator Log",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.serverMenu",
+        "title": "Emulator",
         "category": "BBC Micro"
       },
       {
         "command": "bbcMicro.copyMcpSetup",
-        "title": "Copy MCP Setup for Claude Code…",
+        "title": "Copy MCP Setup for Claude Code...",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.runFile",
+        "title": "Run on the BBC Micro",
+        "icon": "$(play)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.debugFile",
+        "title": "Debug on the BBC Micro",
+        "icon": "$(debug-alt)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.saveSnapshot",
+        "title": "Save Snapshot...",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.showScreen",
+        "title": "Show Screen",
+        "icon": "$(device-desktop)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.showScreenOf",
+        "title": "Show Screen of...",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.screenScaling",
+        "title": "Screen Scaling...",
+        "icon": "$(zoom-in)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.typeText",
+        "title": "Type Text at the Keyboard...",
+        "icon": "$(keyboard)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.pressBreak",
+        "title": "Press BREAK",
+        "icon": "$(debug-restart)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.powerCycle",
+        "title": "Power Off and On",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.setSpeed",
+        "title": "Set Emulation Speed...",
+        "icon": {
+          "light": "media/toolbar/speed-light.svg",
+          "dark": "media/toolbar/speed-dark.svg"
+        },
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.watchAddress",
+        "title": "Watch Address...",
+        "icon": "$(eye)",
+        "enablement": "debugType == 'bbcmicro'",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.clearWatchpoint",
+        "title": "Remove Watchpoint",
+        "icon": "$(close)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.clearWatchpoints",
+        "title": "Remove All Watchpoints",
+        "icon": "$(clear-all)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.toggleWatchpoint",
+        "title": "Enable/Disable Watchpoint",
+        "icon": "$(eye-closed)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.stepBackInto",
+        "title": "Step Back Into",
+        "icon": {
+          "light": "media/toolbar/step-back-into-light.svg",
+          "dark": "media/toolbar/step-back-into-dark.svg"
+        },
+        "enablement": "debugState == 'stopped'",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.stepBackOut",
+        "title": "Step Back Out",
+        "icon": {
+          "light": "media/toolbar/step-back-out-light.svg",
+          "dark": "media/toolbar/step-back-out-dark.svg"
+        },
+        "enablement": "debugState == 'stopped'",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.runBackToCursor",
+        "title": "Run Back to Cursor",
+        "enablement": "debugState == 'stopped'",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.runBackToWrite",
+        "title": "Run Back to Last Write...",
+        "enablement": "debugState == 'stopped'",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.returnToLive",
+        "title": "Return to Live",
+        "icon": {
+          "light": "media/toolbar/return-to-live-light.svg",
+          "dark": "media/toolbar/return-to-live-dark.svg"
+        },
+        "enablement": "debugState == 'stopped'",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileStart",
+        "title": "Start Profiling",
+        "icon": {
+          "light": "media/toolbar/profile-start-light.svg",
+          "dark": "media/toolbar/profile-start-dark.svg"
+        },
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileStop",
+        "title": "Stop Profiling",
+        "icon": {
+          "light": "media/toolbar/profile-stop-light.svg",
+          "dark": "media/toolbar/profile-stop-dark.svg"
+        },
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileHotSpots",
+        "title": "Show Profile Hot Spots",
+        "icon": "$(list-ordered)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileRefresh",
+        "title": "Refresh Profile",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileClear",
+        "title": "Clear Profile",
+        "icon": "$(clear-all)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileSortBySelf",
+        "title": "Sort Profile Tree by Own Code",
+        "icon": "$(sort-precedence)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileSortByTotal",
+        "title": "Sort Profile Tree by Total",
+        "icon": "$(list-tree)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileMarkIdle",
+        "title": "Mark as Idle",
+        "icon": "$(watch)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileUnmarkIdle",
+        "title": "Unmark Idle",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileSetIdle",
+        "title": "Set Idle Routines...",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileSetPeriod",
+        "title": "Set Profile Period...",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileShowPeriod",
+        "title": "Show on Source",
+        "icon": "$(eye)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileShowAll",
+        "title": "Show Whole Profile on Source",
+        "icon": "$(eye-closed)",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileTintWithCalls",
+        "title": "Tint JSR Lines With Their Calls' Time",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.profileTintOwnCode",
+        "title": "Tint Lines By Their Own Code Only",
         "category": "BBC Micro"
       }
     ],
+    "views": {
+      "debug": [
+        {
+          "id": "bbcMicroProfile",
+          "name": "BBC Micro Profile",
+          "when": "debugType == 'bbcmicro' || bbcMicro.hasProfile"
+        },
+        {
+          "id": "bbcMicroWatchpoints",
+          "name": "BBC Micro Watchpoints",
+          "when": "debugType == 'bbcmicro'"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "bbcMicroWatchpoints",
+        "contents": "Nothing is being watched.\n[Watch Address...](command:bbcMicro.watchAddress)\nA watchpoint stops the machine when the program reads or writes an address. VS Code's own, set from the memory inspector or the Variables pane, are listed here too."
+      },
+      {
+        "view": "bbcMicroProfile",
+        "contents": "Nothing profiled yet.\n[Start Profiling](command:bbcMicro.profileStart)\nCounts where the time goes while the program runs, without stopping it: hot lines are tinted in the source, and the call tree is here."
+      }
+    ],
     "menus": {
+      "editor/context": [
+        {
+          "command": "bbcMicro.runBackToCursor",
+          "when": "debugType == 'bbcmicro' && stepBackSupported && (editorLangId == beebasm || resourceExtname =~ /^\\.(6502|beebasm|asm|s|inc)$/)",
+          "group": "debug@3"
+        },
+        {
+          "command": "bbcMicro.runBackToWrite",
+          "when": "debugType == 'bbcmicro' && stepBackSupported && (editorLangId == beebasm || resourceExtname =~ /^\\.(6502|beebasm|asm|s|inc)$/)",
+          "group": "debug@4"
+        },
+        {
+          "command": "bbcMicro.watchAddress",
+          "when": "debugType == 'bbcmicro' && (editorLangId == beebasm || resourceExtname =~ /^\\.(6502|beebasm|asm|s|inc)$/)",
+          "group": "debug@5"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "bbcMicro.showScreen",
+          "when": "debugType == 'bbcmicro' && !(activeWebviewPanelId == 'bbcMicroScreen')",
+          "group": "navigation"
+        },
+        {
+          "command": "bbcMicro.typeText",
+          "when": "activeWebviewPanelId == 'bbcMicroScreen'",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bbcMicro.screenScaling",
+          "when": "activeWebviewPanelId == 'bbcMicroScreen'",
+          "group": "navigation@2"
+        },
+        {
+          "command": "bbcMicro.pressBreak",
+          "when": "activeWebviewPanelId == 'bbcMicroScreen'",
+          "group": "navigation@3"
+        },
+        {
+          "command": "bbcMicro.powerCycle",
+          "when": "activeWebviewPanelId == 'bbcMicroScreen'",
+          "group": "machine@1"
+        },
+        {
+          "command": "bbcMicro.setSpeed",
+          "when": "activeWebviewPanelId == 'bbcMicroScreen' && debugType == 'bbcmicro'",
+          "group": "machine@2"
+        },
+        {
+          "command": "bbcMicro.saveSnapshot",
+          "when": "activeWebviewPanelId == 'bbcMicroScreen' && debugType == 'bbcmicro'",
+          "group": "machine@3"
+        }
+      ],
       "explorer/context": [
         {
           "command": "bbcMicro.runFile",
@@ -381,11 +652,229 @@
           "group": "navigation@91"
         }
       ],
-      "editor/title": [
+      "commandPalette": [
         {
-          "command": "bbcMicro.showScreen",
-          "when": "debugType == bbcmicro",
-          "group": "navigation"
+          "command": "bbcMicro.runFile",
+          "when": "false"
+        },
+        {
+          "command": "bbcMicro.debugFile",
+          "when": "false"
+        },
+        {
+          "command": "bbcMicro.serverMenu",
+          "when": "false"
+        },
+        {
+          "command": "bbcMicro.serverStop",
+          "when": "bbcMicro.serverRunning"
+        },
+        {
+          "command": "bbcMicro.serverRestart",
+          "when": "bbcMicro.serverRunning"
+        },
+        {
+          "command": "bbcMicro.watchAddress",
+          "when": "debugType == 'bbcmicro'"
+        },
+        {
+          "command": "bbcMicro.clearWatchpoint",
+          "when": "false"
+        },
+        {
+          "command": "bbcMicro.toggleWatchpoint",
+          "when": "false"
+        },
+        {
+          "command": "bbcMicro.clearWatchpoints",
+          "when": "debugType == 'bbcmicro' && bbcMicro.hasWatchpoints"
+        },
+        {
+          "command": "bbcMicro.stepBackInto",
+          "when": "debugType == 'bbcmicro' && stepBackSupported"
+        },
+        {
+          "command": "bbcMicro.stepBackOut",
+          "when": "debugType == 'bbcmicro' && stepBackSupported"
+        },
+        {
+          "command": "bbcMicro.runBackToCursor",
+          "when": "false"
+        },
+        {
+          "command": "bbcMicro.runBackToWrite",
+          "when": "debugType == 'bbcmicro' && stepBackSupported"
+        },
+        {
+          "command": "bbcMicro.returnToLive",
+          "when": "debugType == 'bbcmicro' && bbcMicro.inPast"
+        },
+        {
+          "command": "bbcMicro.setSpeed",
+          "when": "debugType == 'bbcmicro'"
+        },
+        {
+          "command": "bbcMicro.saveSnapshot",
+          "when": "debugType == 'bbcmicro'"
+        },
+        {
+          "command": "bbcMicro.profileStart",
+          "when": "debugType == 'bbcmicro' && !bbcMicro.profiling"
+        },
+        {
+          "command": "bbcMicro.profileStop",
+          "when": "debugType == 'bbcmicro' && bbcMicro.profiling"
+        },
+        {
+          "command": "bbcMicro.profileRefresh",
+          "when": "debugType == 'bbcmicro'"
+        },
+        {
+          "command": "bbcMicro.profileMarkIdle",
+          "when": "false"
+        },
+        {
+          "command": "bbcMicro.profileUnmarkIdle",
+          "when": "false"
+        },
+        {
+          "command": "bbcMicro.profileShowPeriod",
+          "when": "false"
+        },
+        {
+          "command": "bbcMicro.profileShowAll",
+          "when": "bbcMicro.profileShowingPeriod"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "bbcMicro.toggleWatchpoint",
+          "when": "view == bbcMicroWatchpoints && viewItem == bbcWatchpoint",
+          "group": "inline@1"
+        },
+        {
+          "command": "bbcMicro.clearWatchpoint",
+          "when": "view == bbcMicroWatchpoints && viewItem == bbcWatchpoint",
+          "group": "inline@2"
+        },
+        {
+          "command": "bbcMicro.profileMarkIdle",
+          "when": "view == bbcMicroProfile && viewItem == bbcProfileRoutine",
+          "group": "profile@1"
+        },
+        {
+          "command": "bbcMicro.profileUnmarkIdle",
+          "when": "view == bbcMicroProfile && viewItem == bbcProfileIdleRoutine",
+          "group": "profile@1"
+        },
+        {
+          "command": "bbcMicro.profileShowPeriod",
+          "when": "view == bbcMicroProfile && viewItem == bbcProfilePeriod",
+          "group": "inline"
+        },
+        {
+          "command": "bbcMicro.profileShowAll",
+          "when": "view == bbcMicroProfile && viewItem == bbcProfilePeriods && bbcMicro.profileShowingPeriod",
+          "group": "inline"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "bbcMicro.watchAddress",
+          "when": "view == bbcMicroWatchpoints",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bbcMicro.clearWatchpoints",
+          "when": "view == bbcMicroWatchpoints && bbcMicro.hasWatchpoints",
+          "group": "navigation@2"
+        },
+        {
+          "command": "bbcMicro.profileStart",
+          "when": "view == bbcMicroProfile && !bbcMicro.profiling",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bbcMicro.profileStop",
+          "when": "view == bbcMicroProfile && bbcMicro.profiling",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bbcMicro.profileSortBySelf",
+          "when": "view == bbcMicroProfile && bbcMicro.profileSort != 'self'",
+          "group": "navigation@2"
+        },
+        {
+          "command": "bbcMicro.profileSortByTotal",
+          "when": "view == bbcMicroProfile && bbcMicro.profileSort == 'self'",
+          "group": "navigation@2"
+        },
+        {
+          "command": "bbcMicro.profileHotSpots",
+          "when": "view == bbcMicroProfile && bbcMicro.hasProfile",
+          "group": "navigation@3"
+        },
+        {
+          "command": "bbcMicro.profileClear",
+          "when": "view == bbcMicroProfile && bbcMicro.hasProfile && !bbcMicro.profiling",
+          "group": "navigation@4"
+        },
+        {
+          "command": "bbcMicro.profileShowAll",
+          "when": "view == bbcMicroProfile && bbcMicro.profileShowingPeriod",
+          "group": "navigation@0"
+        },
+        {
+          "command": "bbcMicro.profileSetIdle",
+          "when": "view == bbcMicroProfile",
+          "group": "profile@1"
+        },
+        {
+          "command": "bbcMicro.profileSetPeriod",
+          "when": "view == bbcMicroProfile",
+          "group": "profile@2"
+        },
+        {
+          "command": "bbcMicro.profileTintOwnCode",
+          "when": "view == bbcMicroProfile && bbcMicro.profileCumulative",
+          "group": "profile@3"
+        },
+        {
+          "command": "bbcMicro.profileTintWithCalls",
+          "when": "view == bbcMicroProfile && !bbcMicro.profileCumulative",
+          "group": "profile@3"
+        }
+      ],
+      "debug/toolBar": [
+        {
+          "command": "bbcMicro.stepBackInto",
+          "when": "debugType == 'bbcmicro' && stepBackSupported",
+          "group": "navigation@0"
+        },
+        {
+          "command": "bbcMicro.stepBackOut",
+          "when": "debugType == 'bbcmicro' && stepBackSupported",
+          "group": "navigation@0"
+        },
+        {
+          "command": "bbcMicro.returnToLive",
+          "when": "debugType == 'bbcmicro' && bbcMicro.inPast",
+          "group": "navigation@0"
+        },
+        {
+          "command": "bbcMicro.setSpeed",
+          "when": "debugType == 'bbcmicro'",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bbcMicro.profileStart",
+          "when": "debugType == 'bbcmicro' && !bbcMicro.profiling",
+          "group": "navigation@2"
+        },
+        {
+          "command": "bbcMicro.profileStop",
+          "when": "debugType == 'bbcmicro' && bbcMicro.profiling",
+          "group": "navigation@2"
         }
       ]
     },
@@ -398,40 +887,69 @@
     "configuration": {
       "title": "BBC Micro",
       "properties": {
-        "bbcMicro.dapPort": {
+        "bbcMicro.server.dapPort": {
           "type": "number",
           "default": 4811,
-          "description": "The port the emulator serves the Debug Adapter Protocol on."
+          "markdownDescription": "The port the emulator serves the Debug Adapter Protocol on (`--dap-port`). Launch configurations without `ports` connect here."
         },
-        "bbcMicro.httpPort": {
+        "bbcMicro.server.httpPort": {
           "type": "number",
           "default": 8811,
-          "description": "The port the emulator serves MCP (/mcp) and the screen on."
+          "markdownDescription": "The port the emulator serves MCP (`/mcp`), the screen and the sound on (`--http-port`)."
         },
-        "bbcMicro.model": {
+        "bbcMicro.server.model": {
           "type": "string",
           "default": "B-DFS1.2",
-          "description": "The model the emulator starts as (a launch configuration's model overrides it)."
+          "markdownDescription": "The model a started emulator is (`--model`); a launch configuration's `model` overrides it."
         },
-        "bbcMicro.nodePath": {
+        "bbcMicro.server.nodePath": {
           "type": "string",
           "default": "",
-          "description": "Run the emulator with this Node.js (22 or later) instead of VS Code's own."
+          "markdownDescription": "Run the emulator with this Node.js (22 or later) instead of VS Code's own."
         },
-        "bbcMicro.showScreenOnDebug": {
+        "bbcMicro.screen.showOnDebug": {
           "type": "boolean",
           "default": true,
           "description": "Open the screen panel when a BBC Micro debug session starts."
         },
-        "bbcMicro.screenScale": {
+        "bbcMicro.screen.filter": {
           "type": "string",
           "enum": [
+            "nearest",
+            "sharp-bilinear",
+            "bilinear"
+          ],
+          "enumDescriptions": [
+            "Hard-edged pixels, as the video ULA drew them. Uneven at in-between sizes.",
+            "Hard-edged pixels, evenly sized at any size: nearest neighbour to a whole multiple, then bilinear for the rest.",
+            "Smoothed, as a television would soften it."
+          ],
+          "default": "nearest",
+          "description": "How the screen panel scales the BBC's picture."
+        },
+        "bbcMicro.screen.scale": {
+          "type": "string",
+          "enum": [
+            "fit-integer",
             "fit",
             "1",
             "2"
           ],
-          "default": "fit",
-          "description": "How the screen panel scales the picture."
+          "enumDescriptions": [
+            "As large as the panel allows in whole steps, so every pixel is the same size; scaled down smoothly in a panel too small for 1x.",
+            "Fill the panel, keeping the shape.",
+            "896 x 600: jsbeeb's frame as it is",
+            "1792 x 1200"
+          ],
+          "default": "fit-integer",
+          "description": "How large the screen panel draws the BBC's picture, border included."
+        },
+        "bbcMicro.screen.scanlines": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 0,
+          "markdownDescription": "How dark the gaps between the screen panel's scanlines are, as a percentage: `0` is off, `100` black. Drawn over the lower half of each BBC line, after the filter. Needs at least two device pixels to a line, so it shows nothing at `1x` on an unscaled display."
         }
       }
     }

@@ -24,9 +24,9 @@ const FlagNames = [
 
 let nextSessionId = 1;
 
-export function startDapServer(engine, { port, host = "127.0.0.1", log = () => {} }) {
+export function startDapServer(engine, { port, host = "127.0.0.1", log = () => {}, serverInfo = () => ({}) }) {
     const server = net.createServer((socket) => {
-        const session = new DapSession(engine, socket, log);
+        const session = new DapSession(engine, socket, log, serverInfo);
         log(`DAP: client ${session.id} connected`);
     });
     return new Promise((resolve, reject) => {
@@ -51,10 +51,11 @@ function formatValue(v, bytes = v > 0xff || v < 0 ? 2 : 1) {
 }
 
 export class DapSession {
-    constructor(engine, socket, log) {
+    constructor(engine, socket, log, serverInfo = () => ({})) {
         this.engine = engine;
         this.socket = socket;
         this.log = log;
+        this.serverInfo = serverInfo;
         this.id = nextSessionId++;
         this.owner = `dap${this.id}`;
         this.seq = 1;
@@ -434,24 +435,210 @@ export class DapSession {
     }
 
     // Going back is answered first; the stop where it lands follows as a
-    // stopped event, as a step's does.
+    // stopped event, as a step's does, and then a bbcRewind event saying
+    // whether it found anything -- the stop alone looks the same as a search
+    // that found nothing. stepBack and reverseContinue are VS Code's own
+    // buttons; the rest are the extension's (rewind_view.js), named as the
+    // ZX Spectrum's adapter has them.
     on_stepBack() {
-        this._goBack(() => this.engine.stepBack("over", 1));
+        this._goBack("stepBack", () => this.engine.stepBack("over", 1));
     }
 
     on_reverseContinue() {
-        this._goBack(() => this.engine.reverseContinue());
+        this._goBack("reverseContinue", () => this.engine.reverseContinue());
     }
 
-    _goBack(fn) {
+    on_stepBackInto() {
+        this._goBack("stepBackInto", () => this.engine.stepBack("into", 1));
+    }
+
+    on_stepBackOut() {
+        this._goBack("stepBackOut", () => this.engine.stepBack("out", 1));
+    }
+
+    on_returnToLive() {
+        this._goBack("returnToLive", () => this.engine.returnToLive());
+    }
+
+    /** Run Back to Cursor: a source line, mapped as a breakpoint's is, or an address. */
+    on_runBackToAddress(args) {
+        let where;
+        if (args.source?.path && Number.isInteger(args.line)) {
+            const at = this.engine.debugInfo.addressForLine(args.source.path, args.line);
+            if (!at) {
+                throw new Error(this.engine.debugInfo.hasFile(args.source.path) ? "No code on or after this line" : "No debug info for this file");
+            }
+            where = { address: at.address, bank: at.bank };
+        } else {
+            where = this._bankedAddress(args.address, "runBackToAddress");
+        }
+        this._goBack("runBackToAddress", () => this.engine.runBackTo(where.address, { bank: where.bank }));
+    }
+
+    on_runBackToWrite(args) {
+        const { address } = this._bankedAddress(args.address, "runBackToWrite");
+        this._goBack("runBackToWrite", () => this.engine.runBackToWrite(address));
+    }
+
+    _goBack(command, fn) {
         setImmediate(() => {
+            let message = "";
+            let moved = false;
             try {
-                fn();
+                const result = fn();
+                moved = !!result.moved;
+                if (result.note) message = result.note;
+                else if (!moved && command !== "returnToLive") message = "Nothing earlier in the history matches: the machine is where it was";
             } catch (e) {
-                this.event("output", { category: "stderr", output: `${e.message}\n` });
+                message = e.message;
                 this._sendStopped({ reason: "step", description: e.message });
             }
+            const h = this.engine.history;
+            this.event("bbcRewind", { command, moved, message, inPast: h.inPast, behindCycles: h.behindCycles });
+            if (message) this.event("output", { category: "console", output: `${command}: ${message}\n` });
         });
+    }
+
+    /** "4:&8000", or an address, symbol or expression: { address, bank }. */
+    _bankedAddress(text, command) {
+        if (text === undefined || text === "") throw new Error(`'${command}' needs an 'address'`);
+        let bank;
+        const m = typeof text === "string" ? BankPrefix.exec(text) : null;
+        if (m) {
+            bank = parseInt(m[1], /^[0-9]+$/.test(m[1]) ? 10 : 16);
+            text = text.slice(m[0].length);
+        }
+        return { address: this.engine.resolveAddress(text), bank };
+    }
+
+    // -- the extension's own requests ------------------------------------------
+    // Not standard DAP: what the extension's speed control, Watchpoints view
+    // and commands send. Named, and shaped, as the ZX Spectrum's adapter has
+    // them, so the two extensions work alike.
+
+    /** Which server this is: its pid, the ports it is really on, and what it last loaded. */
+    on_serverInfo() {
+        return this.serverInfo();
+    }
+
+    /** The debug toolbar's speed control: a multiplier on real time, or uncapped. */
+    on_setSpeed(args) {
+        const e = this.engine;
+        if (typeof args.multiplier === "number") {
+            e.speedMultiplier = Math.min(20, Math.max(0.001, args.multiplier));
+            e.warp = false;
+        }
+        if (typeof args.uncapped === "boolean") e.warp = args.uncapped;
+        return { uncapped: e.warp, multiplier: e.speedMultiplier };
+    }
+
+    /** How much history there is and where the machine is in it, for the "before live" status. */
+    on_history() {
+        const e = this.engine;
+        const h = e.history;
+        const s = h.status();
+        return {
+            rewind: true,
+            available: s.available,
+            note: s.note,
+            live: s.live,
+            oldestCycle: h.start,
+            headCycle: h.head,
+            positionCycle: e.elapsedCycles,
+            cyclesPerFrame: e.model.cyclesPerSecond / 50,
+            checkpoints: s.checkpoints,
+            bytes: s.bytes,
+        };
+    }
+
+    /** Every watchpoint the machine has, whoever set it. */
+    on_watchpoints() {
+        return this._watchpointsBody();
+    }
+
+    /**
+     * Add a watchpoint (the editor's Watch Address command), or with `id`
+     * change one (the Watchpoints view's enable/disable), keeping whatever is
+     * not given. Unlike setDataBreakpoints, it adds one rather than replacing
+     * a set, and it outlives the session, as MCP's do.
+     */
+    on_setWatchpoint(args) {
+        const e = this.engine;
+        const old = args.id !== undefined ? e.watchpoints().find((w) => w.id === Number(args.id)) : undefined;
+        if (args.id !== undefined && !old) throw new Error(`No watchpoint ${args.id}`);
+        const where = args.address !== undefined || !old ? this._bankedAddress(args.address, "setWatchpoint") : { address: old.address, bank: old.bank };
+        const access = args.access === undefined ? old?.access ?? "write" : args.access === "readWrite" ? "readwrite" : args.access;
+        e.addWatchpoint({
+            id: old?.id,
+            owner: "editor",
+            address: where.address,
+            bank: where.bank,
+            length: args.length ?? old?.length ?? 1,
+            access,
+            onChange: args.onChange ?? old?.onChange ?? true,
+            condition: args.condition || old?.condition,
+            value: old?.value,
+            notValue: old?.notValue,
+            enabled: args.enabled ?? old?.enabled ?? true,
+        });
+        return this._watchpointsBody();
+    }
+
+    /** Remove one watchpoint, or with no id every one, whoever set it. */
+    on_clearWatchpoint(args) {
+        if (args.id) this.engine.removeWatchpoint(Number(args.id));
+        else this.engine.clearWatchpoints();
+        return this._watchpointsBody();
+    }
+
+    _watchpointsBody() {
+        const e = this.engine;
+        return {
+            watchpoints: e.watchpoints().map((w) => {
+                const named = /\((.*)\)$/.exec(e.describeAddress(w.address, w.bank));
+                return {
+                    id: w.id,
+                    owner: w.owner,
+                    symbol: named ? named[1] : "",
+                    address: w.address,
+                    bank: w.bank,
+                    length: w.length,
+                    onWrite: w.access !== "read",
+                    onRead: w.access !== "write",
+                    onChange: w.onChange,
+                    test: w.value !== undefined ? "=" : w.notValue !== undefined ? "<>" : "",
+                    value: w.value ?? w.notValue ?? 0,
+                    condition: w.condition ?? "",
+                    enabled: w.enabled,
+                    hits: w.hits,
+                };
+            }),
+        };
+    }
+
+    /** Save the machine to a file, as MCP's save_snapshot does. */
+    on_saveSnapshot(args) {
+        if (!args.path) throw new Error("No path given");
+        const file = path.resolve(args.path);
+        return { path: file, bytes: this.engine.saveSnapshot(file) };
+    }
+
+    /**
+     * The execution profile behind the editor's heat map: `start` counts
+     * from zero, `stop` freezes the counts, `get` reports. Works on a
+     * running machine without pausing it.
+     */
+    on_profile(args) {
+        return this.engine.profileForEditor(args.action || "get", {
+            idle: Array.isArray(args.idle) ? args.idle : undefined,
+            period: typeof args.period === "string" ? args.period : undefined,
+            maxRoutines: args.maxRoutines ?? 100,
+        });
+    }
+
+    /** The cassette recorder: play, stop, rewind, eject, or just where the tape is. */
+    on_tapeControl(args) {
+        return this.engine.tapeControl(args.action || "status");
     }
 
     // -- state ---------------------------------------------------------------
@@ -643,5 +830,22 @@ export class DapSession {
 }
 
 const NoResponse = Symbol("NoResponse");
+const BankPrefix = /^\s*(1[0-5]|[0-9]|[A-Fa-f])\s*:/;
 // The requests that set the machine moving: their stops are the debugger's own.
-const Moving = new Set(["launch", "attach", "restart", "continue", "next", "stepIn", "stepOut", "pause", "stepBack", "reverseContinue"]);
+const Moving = new Set([
+    "launch",
+    "attach",
+    "restart",
+    "continue",
+    "next",
+    "stepIn",
+    "stepOut",
+    "pause",
+    "stepBack",
+    "reverseContinue",
+    "stepBackInto",
+    "stepBackOut",
+    "returnToLive",
+    "runBackToAddress",
+    "runBackToWrite",
+]);

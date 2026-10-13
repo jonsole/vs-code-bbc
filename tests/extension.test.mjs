@@ -68,9 +68,19 @@ test("package.json points at files that exist", async () => {
     for (const p of [pkg.main, ...pkg.contributes.grammars.map((g) => g.path), ...pkg.contributes.languages.map((l) => l.configuration)]) {
         assert.ok(fs.existsSync(path.join(Root, p)), p);
     }
+    for (const c of pkg.contributes.commands) {
+        for (const file of typeof c.icon === "object" ? [c.icon.light, c.icon.dark] : []) assert.ok(fs.existsSync(path.join(Root, file)), file);
+    }
+    // Every command is registered somewhere in the extension, and every one a menu names is declared.
     const commands = new Set(pkg.contributes.commands.map((c) => c.command));
-    const ext = fs.readFileSync(path.join(Root, "extension/extension.js"), "utf8");
+    const dir = path.join(Root, "extension");
+    const ext = fs.readdirSync(dir).filter((f) => f.endsWith(".js")).map((f) => fs.readFileSync(path.join(dir, f), "utf8")).join("\n");
     for (const c of commands) assert.ok(ext.includes(`'${c}'`), `${c} is registered`);
+    for (const [menu, items] of Object.entries(pkg.contributes.menus)) {
+        for (const item of items) assert.ok(commands.has(item.command), `${menu}: ${item.command} is declared`);
+    }
+    const views = new Set(Object.values(pkg.contributes.views).flat().map((v) => v.id));
+    for (const v of views) assert.ok(ext.includes(`'${v}'`), `the view ${v} has a provider`);
 });
 
 test("more than one emulator: ports in a launch configuration, and every running emulator found", async (t) => {

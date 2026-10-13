@@ -3,7 +3,8 @@
 // extension reads it to offer the screen of any of them -- started by a
 // window, a task, a terminal or an MCP client -- and server_info says where
 // this one's file is. A file is removed when its emulator exits; one left by
-// an emulator that crashed is recognised by its process being gone.
+// an emulator that crashed (or was killed, on Windows) is recognised by its
+// process being gone, and removed then.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -43,8 +44,11 @@ export function listAdvertised() {
             const entry = JSON.parse(fs.readFileSync(path.join(RegistryDir, n), "utf8"));
             process.kill(entry.pid, 0);
             out.push(entry);
-        } catch {
-            // unreadable, or its process has gone
+        } catch (e) {
+            // Unreadable, or its process has gone, when the file goes too: on
+            // Windows a killed emulator cannot take it away itself, and its pid
+            // may soon be another process's.
+            if (e.code === "ESRCH") fs.rmSync(path.join(RegistryDir, n), { force: true });
         }
     }
     return out;

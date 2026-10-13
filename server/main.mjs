@@ -221,7 +221,7 @@ const httpServer = http.createServer(async (req, res) => {
 });
 
 try {
-    const dap = await startDapServer(engine, { port: opts.dapPort, host: opts.host, log });
+    const dap = await startDapServer(engine, { port: opts.dapPort, host: opts.host, log, serverInfo });
     await new Promise((resolve, reject) => {
         httpServer.once("error", reject);
         httpServer.listen(opts.httpPort, opts.host, resolve);

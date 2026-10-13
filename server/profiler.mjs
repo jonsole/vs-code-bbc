@@ -11,12 +11,24 @@
 //
 // Idle time is the time in routines named as waiting -- the loop a game paces
 // itself with, or the OS waiting for a key -- and is left out of busy time.
+//
+// Two reports: report(), MCP's, the costliest lines and routines and a call
+// tree cut to what matters; and editorReport(), the editor's heat map, in
+// the shape the ZX Spectrum extension's profile view reads -- every source
+// line, the routines with where they start, the whole call tree flat, and
+// the worst periods each in full, so one can be shown as the whole is.
 
 import { hex, isBanked } from "./engine.mjs";
 
 const Opcode = { BRK: 0x00, JSR: 0x20 };
 const Slots = 0x10000 + 16 * 0x4000; // every address, and &8000-&BFFF once per sideways bank
 const Outside = "(outside any call)";
+// The busiest periods kept in full, with their lines and call nodes.
+const WorstKept = 10;
+// Periods kept as numbers, for the averages and the strip.
+const PeriodsKept = 5000;
+// The most values the editor's strip of busy time per period is sent.
+const StripMax = 1200;
 
 export class Profiler {
     /** @param {import("./engine.mjs").Engine} engine */
@@ -38,25 +50,45 @@ export class Profiler {
         this.interrupts = 0;
         this.total = 0;
         this.totalIdle = 0;
-        this.tree = newNode(Outside);
+        this.nodes = []; // every call node, by id: a parent always before its children
+        this.tree = this._newNode(Outside, null);
         this.frames = [{ node: this.tree, s: 0x1ff, site: -1, start: 0, idle: false, idleAtStart: 0 }];
-        this.periods = [];
+        this.periods = []; // { index, start_frame, cycles, idle }, the most recent PeriodsKept
+        this.worst = []; // the busiest periods so far, in full
+        this._periodCount = 0;
         this._period = null;
         this._prev = null; // { slot, opcode, cycles, idle }
         this._firstFrame = this.engine.frameCount;
         this._routineCache = new Map();
     }
 
+    _newNode(name, parent, { addr, bank, interrupt = false } = {}) {
+        const node = { id: this.nodes.length, parent: parent ? parent.id : null, name, addr, bank, interrupt, calls: 0, self: 0, idle: 0, children: new Map() };
+        this.nodes.push(node);
+        return node;
+    }
+
     /** Count from zero from the next instruction; `idle` and `period` carry over unless given. */
     start({ idle, period } = {}) {
-        if (idle !== undefined) this.idle = idle;
-        if (period !== undefined) this.period = period;
+        this.configure({ idle, period });
         this._clear();
-        this._idleRanges = this._resolve(this.idle);
-        this._periodAddress = this.period === "frame" ? undefined : this._resolve([this.period])[0]?.start;
         this.active = true;
         this._lastPaint = this.engine.paintCount;
         this._newPeriod();
+    }
+
+    /** New idle routines or period, from now on: a profile already counting carries on under them. */
+    configure({ idle, period } = {}) {
+        if (idle !== undefined) this.idle = idle;
+        if (period !== undefined) this.period = period;
+        this._idleRanges = this._resolve(this.idle);
+        const unresolved = this.unresolved;
+        this._periodAddress = undefined;
+        if (this.period !== "frame") {
+            this._periodAddress = this._resolve([this.period])[0]?.start;
+            unresolved.push(...this.unresolved);
+        }
+        this.unresolved = unresolved;
     }
 
     stop() {
@@ -65,13 +97,20 @@ export class Profiler {
         this._prev = null;
     }
 
-    /** Routine names to [{ name, start, end }]; the ones that match nothing go to `unresolved`. */
+    /** Routine names (or addresses) to [{ name, start, end }]; the ones that match nothing go to `unresolved`. */
     _resolve(names) {
         const out = [];
         this.unresolved = [];
         const info = this.engine.debugInfo;
         for (const name of names) {
-            const address = info.lookup(name);
+            let address = info.lookup(name);
+            if (address === undefined) {
+                try {
+                    address = this.engine.resolveAddress(name);
+                } catch {
+                    // neither a symbol nor an address
+                }
+            }
             if (address === undefined) {
                 this.unresolved.push(name);
                 continue;
@@ -86,6 +125,11 @@ export class Profiler {
         return isBanked(pc) ? 0x10000 + (this.engine.cpu.romsel & 0x0f) * 0x4000 + (pc - 0x8000) : pc;
     }
 
+    /** A slot's address, and its sideways bank if it is one. */
+    _pcOf(slot) {
+        return slot < 0x10000 ? [slot, undefined] : [0x8000 + ((slot - 0x10000) & 0x3fff), (slot - 0x10000) >> 14];
+    }
+
     _inIdle(pc) {
         for (const r of this._idleRanges) if (pc >= r.start && pc < r.end) return true;
         return false;
@@ -97,20 +141,25 @@ export class Profiler {
         const cpu = e.cpu;
         const now = e.elapsedCycles;
         const prev = this._prev;
+        const p = this._period;
         if (prev) {
             const spent = now - prev.cycles;
+            const node = this.frames.at(-1).node;
             this.cycles[prev.slot] += spent;
             this.total += spent;
-            this.frames.at(-1).node.self += spent;
+            node.self += spent;
             if (prev.idle) {
                 this.idleCycles[prev.slot] += spent;
                 this.totalIdle += spent;
+                node.idle += spent;
             }
-            if (this._period) {
-                this._period.cycles += spent;
-                if (prev.idle) this._period.idle += spent;
+            if (p) {
+                p.cycles += spent;
+                if (prev.idle) p.idle += spent;
                 const r = this.routineOf(prev.pc, prev.bank);
-                this._period.routines.set(r, (this._period.routines.get(r) ?? 0) + spent);
+                p.routines.set(r, (p.routines.get(r) ?? 0) + spent);
+                add(p.slots, prev.slot, spent, prev.idle);
+                add(p.nodes, node.id, spent, prev.idle);
             }
         }
         // Frames left: the stack is back above where they were entered.
@@ -118,21 +167,25 @@ export class Profiler {
         while (frames.length > 1 && cpu.s > frames.at(-1).s) {
             const f = frames.pop();
             if (f.site >= 0) {
-                this.callCycles[f.site] += now - f.start;
-                this.callIdle[f.site] += this.totalIdle - f.idleAtStart;
+                const took = now - f.start;
+                const idle = this.totalIdle - f.idleAtStart;
+                this.callCycles[f.site] += took;
+                this.callIdle[f.site] += idle;
+                // A call that spans periods is charged to the one it returns in.
+                if (p) addCall(p.calls, f.site, took, idle);
             }
         }
         // Frames entered: by the JSR or BRK just run, or an interrupt just taken.
         let entered = null;
-        if (prev && (prev.opcode === Opcode.JSR || prev.opcode === Opcode.BRK)) entered = { name: e.symbolFor(pc) ?? hex(pc), site: prev.slot };
+        if (prev && (prev.opcode === Opcode.JSR || prev.opcode === Opcode.BRK)) entered = { name: e.symbolFor(pc) ?? hex(pc), site: prev.slot, interrupt: false };
         else if (prev && e._irqEntry(cpu)) {
-            entered = { name: "(interrupt)", site: -1 };
+            entered = { name: "(interrupt)", site: -1, interrupt: true };
             this.interrupts++;
         }
         if (entered) {
             const parent = frames.at(-1);
             let node = parent.node.children.get(entered.name);
-            if (!node) parent.node.children.set(entered.name, (node = newNode(entered.name)));
+            if (!node) parent.node.children.set(entered.name, (node = this._newNode(entered.name, parent.node, { addr: pc, bank: e.bankAt(pc), interrupt: entered.interrupt })));
             node.calls++;
             frames.push({ node, s: cpu.s, site: entered.site, start: now, idle: parent.idle || this._inIdle(pc), idleAtStart: this.totalIdle });
         }
@@ -151,28 +204,43 @@ export class Profiler {
 
     _newPeriod() {
         this._closePeriod();
-        this._period = { start_frame: this.engine.frameCount, cycles: 0, idle: 0, routines: new Map() };
+        this._period = {
+            index: this._periodCount++,
+            start_frame: this.engine.frameCount,
+            cycles: 0,
+            idle: 0,
+            routines: new Map(), // name -> cycles, for MCP's worst periods
+            slots: new Map(), // slot -> [cycles, idle]
+            calls: new Map(), // JSR slot -> [cycles, idle] of the calls made from it
+            nodes: new Map(), // call node id -> [cycles, idle] of its own code
+        };
     }
 
     _closePeriod() {
         const p = this._period;
-        if (!p || p.cycles === 0) return;
-        this.periods.push(p);
-        // Keep what the report needs: the ten busiest in full, and the rest as numbers.
-        if (this.periods.length > 5000) this.periods.shift();
         this._period = null;
+        if (!p || p.cycles === 0) return;
+        this.periods.push({ index: p.index, start_frame: p.start_frame, cycles: p.cycles, idle: p.idle });
+        if (this.periods.length > PeriodsKept) this.periods.shift();
+        // Kept in full only while among the busiest.
+        this.worst = worstOf([...this.worst, p]);
     }
 
     /** The routine an address is in: its nearest symbol at or before it, or its 256-byte page. */
     routineOf(pc, bank) {
+        return this._routineAt(pc, bank).name;
+    }
+
+    /** { name, address } of the routine an address is in; no address for a page. */
+    _routineAt(pc, bank) {
         const key = bank === undefined ? pc : `${bank}:${pc}`;
         let r = this._routineCache.get(key);
         if (r === undefined) {
             const near = this.engine.debugInfo.nearest(pc, 0x1000, bank) ?? null;
             const os = this.engine._osSymbol(pc);
-            if (near && !near.name.startsWith(".")) r = near.name;
-            else if (os && os.offset === 0) r = os.name;
-            else r = `${bank !== undefined ? `${bank}:` : ""}${hex(pc & 0xff00)}-${hex((pc & 0xff00) | 0xff)}`;
+            if (near && !near.name.startsWith(".")) r = { name: near.name, address: pc - near.offset };
+            else if (os && os.offset === 0) r = { name: os.name, address: pc };
+            else r = { name: `${bank !== undefined ? `${bank}:` : ""}${hex(pc & 0xff00)}-${hex((pc & 0xff00) | 0xff)}` };
             this._routineCache.set(key, r);
         }
         return r;
@@ -207,7 +275,7 @@ export class Profiler {
         const byRoutine = new Map();
         for (let slot = 0; slot < Slots; slot++) {
             if (!this.hits[slot]) continue;
-            const [pc, bank] = slot < 0x10000 ? [slot, undefined] : [0x8000 + ((slot - 0x10000) & 0x3fff), (slot - 0x10000) >> 14];
+            const [pc, bank] = this._pcOf(slot);
             const where = e.debugInfo.lineFor(pc, bank);
             const key = where ? `${where.file}:${where.line}` : `@${slot}`;
             let l = byLine.get(key);
@@ -241,17 +309,13 @@ export class Profiler {
         out.routines = top(byRoutine.values(), routines);
 
         // The call tree: each node's time is its own and its children's.
-        const total = (node) => {
-            let t = node.self;
-            for (const c of node.children.values()) t += total(c);
-            return t;
-        };
+        const totals = this._nodeTotals();
         const cut = (this.total * treeMinPercent) / 100;
         const shape = (node) => {
-            const children = [...node.children.values()].map((c) => ({ node: c, t: total(c) })).sort((a, b) => b.t - a.t);
+            const children = [...node.children.values()].map((c) => ({ node: c, t: totals[c.id].cycles })).sort((a, b) => b.t - a.t);
             const kept = children.filter((c) => c.t >= cut);
             const other = children.filter((c) => c.t < cut).reduce((n, c) => n + c.t, 0);
-            const out = { name: node.name, calls: node.calls, cycles: Math.round(total(node)), self_cycles: Math.round(node.self) };
+            const out = { name: node.name, calls: node.calls, cycles: Math.round(totals[node.id].cycles), self_cycles: Math.round(node.self) };
             if (kept.length) out.children = kept.map((c) => shape(c.node));
             if (other) out.other_calls_cycles = Math.round(other);
             return out;
@@ -259,14 +323,14 @@ export class Profiler {
         out.call_tree = shape(this.tree);
 
         // Periods.
-        const periods = this._period?.cycles ? [...this.periods, this._period] : this.periods;
+        const periods = this._allPeriods();
         if (periods.length) {
             const busyOf = (p) => p.cycles - p.idle;
-            const worst = [...periods].sort((a, b) => busyOf(b) - busyOf(a)).slice(0, 10);
+            const worst = worstOf(this._worstCandidates());
             out.periods = {
-                count: periods.length,
+                count: this._countedPeriods(),
                 busy_cycles_average: Math.round(periods.reduce((n, p) => n + busyOf(p), 0) / periods.length),
-                busiest_cycles: Math.round(busyOf(worst[0])),
+                busiest_cycles: Math.round(busyOf(worst[0] ?? periods[0])),
                 without_idle: periods.filter((p) => p.idle === 0).length,
                 worst: worst.map((p) => ({
                     start_frame: p.start_frame,
@@ -282,8 +346,199 @@ export class Profiler {
         }
         return out;
     }
+
+    /**
+     * The editor's report: the ZX Spectrum extension's profile view reads
+     * this shape, with a BBC Micro's cycles where the Spectrum has T-states.
+     * Every source line that ran; the routines, with where each starts, the
+     * costliest `maxRoutines`; the call tree as flat nodes, parents first;
+     * and the periods, the busiest kept in full.
+     */
+    editorReport({ maxRoutines = 100 } = {}) {
+        const e = this.engine;
+        const frameCycles = e.model.cyclesPerSecond / 50;
+        const base = { active: this.active, idle: this.idle, unresolved: this.unresolved ?? [], frame_cycles: frameCycles };
+        if (!this.hits) return { ...base, frames: 0, cycles: 0, idle_cycles: 0, unmapped_cycles: 0, lines: [], routines: [], call_nodes: [] };
+
+        const entries = function* (p) {
+            for (let slot = 0; slot < Slots; slot++) {
+                if (p.hits[slot]) yield { slot, hits: p.hits[slot], cycles: p.cycles[slot], idle: p.idleCycles[slot], calls: p.callCycles[slot], callsIdle: p.callIdle[slot] };
+            }
+        };
+        const whole = this._fold(entries(this), maxRoutines);
+        const totals = this._nodeTotals();
+        const out = {
+            ...base,
+            frames: e.frameCount - this._firstFrame,
+            cycles: Math.round(this.total),
+            idle_cycles: Math.round(this.totalIdle),
+            unmapped_cycles: Math.round(whole.unmapped),
+            lines: whole.lines,
+            routines: whole.routines,
+            call_nodes: this.nodes.map((n) => {
+                const where = n.addr !== undefined ? e.debugInfo.lineFor(n.addr, n.bank) : undefined;
+                return {
+                    id: n.id,
+                    parent: n.parent,
+                    name: n.name,
+                    addr: n.addr,
+                    interrupt: n.interrupt,
+                    path: where?.file,
+                    line: where?.line,
+                    calls: n.calls,
+                    self_cycles: Math.round(n.self),
+                    idle_cycles: Math.round(n.idle),
+                    cycles: Math.round(totals[n.id].cycles),
+                };
+            }),
+        };
+
+        const periods = this._allPeriods();
+        if (periods.length) {
+            const busyOf = (p) => p.cycles - p.idle;
+            // The strip: busy time per period, oldest first, each block the busiest of `bucket`.
+            const bucket = Math.max(1, Math.ceil(periods.length / StripMax));
+            const strip = [];
+            for (let i = 0; i < periods.length; i += bucket) {
+                let most = 0;
+                for (let j = i; j < periods.length && j < i + bucket; j++) most = Math.max(most, busyOf(periods[j]));
+                strip.push(Math.round(most));
+            }
+            const worst = worstOf(this._worstCandidates());
+            out.periods = {
+                by: this._periodAddress !== undefined ? "marker" : "frame",
+                name: this._periodAddress !== undefined ? this.period : "frame",
+                count: this._countedPeriods(),
+                busy_cycles_average: Math.round(periods.reduce((n, p) => n + busyOf(p), 0) / periods.length),
+                busiest_cycles: Math.round(Math.max(...strip)),
+                without_idle: periods.filter((p) => p.idle === 0).length,
+                bucket,
+                strip,
+                worst: worst.map((p) => {
+                    const slots = new Set([...p.slots.keys(), ...p.calls.keys()]);
+                    const fold = this._fold(
+                        [...slots].map((slot) => {
+                            const [cycles, idle] = p.slots.get(slot) ?? [0, 0];
+                            const [calls, callsIdle] = p.calls.get(slot) ?? [0, 0];
+                            return { slot, cycles, idle, calls, callsIdle };
+                        }),
+                        maxRoutines,
+                    );
+                    return {
+                        index: p.index,
+                        start_frame: p.start_frame,
+                        cycles: Math.round(p.cycles),
+                        idle_cycles: Math.round(p.idle),
+                        busy_cycles: Math.round(busyOf(p)),
+                        unmapped_cycles: Math.round(fold.unmapped),
+                        lines: fold.lines,
+                        routines: fold.routines,
+                        nodes: [...p.nodes.entries()].map(([id, [cycles, idle]]) => [id, Math.round(cycles), Math.round(idle)]),
+                    };
+                }),
+            };
+        }
+        return out;
+    }
+
+    /**
+     * Addresses folded into source lines and routines, for the editor:
+     * entries of { slot, hits?, cycles, idle, calls, callsIdle }. Time on an
+     * address with no source line is `unmapped`.
+     */
+    _fold(entries, maxRoutines) {
+        const e = this.engine;
+        const byLine = new Map();
+        const byRoutine = new Map();
+        let unmapped = 0;
+        for (const x of entries) {
+            const [pc, bank] = this._pcOf(x.slot);
+            const r = this._routineAt(pc, bank);
+            let routine = byRoutine.get(r.name);
+            if (!routine) {
+                const at = r.address !== undefined ? e.debugInfo.lineFor(r.address, bank) : undefined;
+                routine = { name: r.name, path: at?.file, line: at?.line, hits: x.hits === undefined ? undefined : 0, cycles: 0, idle_cycles: 0 };
+                byRoutine.set(r.name, routine);
+            }
+            if (x.hits !== undefined) routine.hits += x.hits;
+            routine.cycles += x.cycles;
+            routine.idle_cycles += x.idle;
+            const where = e.debugInfo.lineFor(pc, bank);
+            if (!where) {
+                unmapped += x.cycles;
+                continue;
+            }
+            const key = `${where.file}:${where.line}`;
+            let l = byLine.get(key);
+            if (!l) {
+                const named = /\((.*)\)$/.exec(e.describeAddress(pc, bank));
+                l = { path: where.file, line: where.line, symbol: named ? named[1] : "", hits: x.hits === undefined ? undefined : 0, cycles: 0, idle_cycles: 0, calls_cycles: 0, calls_idle_cycles: 0 };
+                byLine.set(key, l);
+            }
+            if (x.hits !== undefined) l.hits += x.hits;
+            l.cycles += x.cycles;
+            l.idle_cycles += x.idle;
+            l.calls_cycles += x.calls || 0;
+            l.calls_idle_cycles += x.callsIdle || 0;
+        }
+        const round = (o) => {
+            for (const k of ["cycles", "idle_cycles", "calls_cycles", "calls_idle_cycles"]) if (o[k] !== undefined) o[k] = Math.round(o[k]);
+            return o;
+        };
+        const lines = [...byLine.values()].map(round).sort((a, b) => b.cycles - a.cycles);
+        let routines = [...byRoutine.values()].map(round).sort((a, b) => b.cycles - a.cycles);
+        if (maxRoutines > 0) routines = routines.slice(0, maxRoutines);
+        return { lines, routines, unmapped };
+    }
+
+    /** Each call node's time, its own and its callees': parents come before children, so one backwards pass. */
+    _nodeTotals() {
+        const t = this.nodes.map((n) => ({ cycles: n.self, idle: n.idle }));
+        for (let i = this.nodes.length - 1; i > 0; i--) {
+            const parent = this.nodes[i].parent;
+            t[parent].cycles += t[i].cycles;
+            t[parent].idle += t[i].idle;
+        }
+        return t;
+    }
+
+    /** The periods counted so far, the one in progress included, as numbers. */
+    _allPeriods() {
+        const p = this._period;
+        return p?.cycles ? [...this.periods, { index: p.index, start_frame: p.start_frame, cycles: p.cycles, idle: p.idle }] : this.periods;
+    }
+
+    _countedPeriods() {
+        return this._periodCount - (this._period && !this._period.cycles ? 1 : 0);
+    }
+
+    /** The periods that may be among the busiest: the kept ones, and the one in progress. */
+    _worstCandidates() {
+        return this._period?.cycles ? [...this.worst, this._period] : this.worst;
+    }
 }
 
-function newNode(name) {
-    return { name, calls: 0, self: 0, children: new Map() };
+/** The busiest periods, busiest first, at most WorstKept. */
+function worstOf(periods) {
+    return [...periods].sort((a, b) => b.cycles - b.idle - (a.cycles - a.idle)).slice(0, WorstKept);
+}
+
+function add(map, key, cycles, idle) {
+    const v = map.get(key);
+    if (v) {
+        v[0] += cycles;
+        if (idle) v[1] += cycles;
+    } else {
+        map.set(key, [cycles, idle ? cycles : 0]);
+    }
+}
+
+function addCall(map, key, cycles, idle) {
+    const v = map.get(key);
+    if (v) {
+        v[0] += cycles;
+        v[1] += idle;
+    } else {
+        map.set(key, [cycles, idle]);
+    }
 }

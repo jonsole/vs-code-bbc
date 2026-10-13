@@ -415,7 +415,7 @@ export class Engine extends EventEmitter {
         const tracing = !!this._trace?.active;
         const wantInstr =
             this._bpByAddress.size > 0 || this._step !== null || this.breakOnInterrupt || this._nextInput !== null || tracing || this.profiler?.active;
-        const watches = [...this._watchpoints.values()];
+        const watches = [...this._watchpoints.values()].filter((w) => w.enabled);
         const wantRead = tracing || watches.some((w) => w.access !== "write");
         const wantWrite = tracing || watches.some((w) => w.access !== "read");
         const toggle = (key, want, hook, fn) => {
@@ -523,6 +523,7 @@ export class Engine extends EventEmitter {
     /** The watchpoint an access sets off, if any: { watchpoint, access, address, old, new }. */
     _matchWatch(access, addr, val) {
         for (const w of this._watchpoints.values()) {
+            if (!w.enabled) continue;
             if (w.access !== "readwrite" && w.access !== access) continue;
             if (addr < w.address || addr >= w.address + w.length) continue;
             if (w.bank !== undefined && w.bank !== this.bankAt(addr)) continue;
@@ -667,17 +668,20 @@ export class Engine extends EventEmitter {
      * access: "read" | "write" | "readwrite". onChange: only a write that
      * changes the value (VS Code's data breakpoints stop on every write, so
      * it is off unless asked for). value / notValue: only an access of, or
-     * not of, that byte.
+     * not of, that byte. enabled: false keeps it, but stops it stopping
+     * anything. id: replace that watchpoint, keeping its id and hit count.
      */
-    addWatchpoint({ owner = "mcp", address, length = 1, access = "write", condition, onChange = false, value, notValue, bank }) {
+    addWatchpoint({ owner = "mcp", address, length = 1, access = "write", condition, onChange = false, value, notValue, bank, enabled = true, id }) {
         if (!["read", "write", "readwrite"].includes(access)) throw new Error(`access must be read, write or readwrite`);
         for (const v of [value, notValue]) {
             if (v !== undefined && !(Number.isInteger(v) && v >= 0 && v <= 255)) throw new Error("a watchpoint watches bytes: the value must be 0-255");
         }
         if (value !== undefined && notValue !== undefined) throw new Error("value and not_value are two answers to the same question");
+        const replaced = id !== undefined ? this._watchpoints.get(id) : undefined;
+        if (id !== undefined && !replaced) throw new Error(`No watchpoint ${id}`);
         const w = {
-            id: this._nextWatchId++,
-            owner,
+            id: replaced ? replaced.id : this._nextWatchId++,
+            owner: replaced ? replaced.owner : owner,
             address: address & 0xffff,
             length: Math.max(1, length | 0),
             access,
@@ -687,7 +691,8 @@ export class Engine extends EventEmitter {
             value,
             notValue,
             bank: isBanked(address & 0xffff) && Number.isInteger(bank) ? bank : undefined,
-            hits: 0,
+            enabled: enabled !== false,
+            hits: replaced ? replaced.hits : 0,
         };
         if (condition) w.compiled = compile(condition);
         this._watchpoints.set(w.id, w);
@@ -1142,6 +1147,20 @@ export class Engine extends EventEmitter {
         else if (action !== "get") throw new Error('action is "start", "stop" or "get"');
         this._updateHooks();
         return this.profiler.report({ lines, routines, treeMinPercent });
+    }
+
+    /**
+     * The same for the editor's heat map and call tree (the DAP `profile`
+     * request): `idle` and `period`, when given, apply first and from now
+     * on, so a start counts against them from its first instruction.
+     */
+    profileForEditor(action = "get", { idle, period, maxRoutines = 100 } = {}) {
+        if (!["start", "stop", "get"].includes(action)) throw new Error(`profile action must be start, stop or get, not '${action}'`);
+        if (idle !== undefined || period !== undefined) this.profiler.configure({ idle, period });
+        if (action === "start") this.profiler.start();
+        else if (action === "stop") this.profiler.stop();
+        this._updateHooks();
+        return this.profiler.editorReport({ maxRoutines });
     }
 
     // -----------------------------------------------------------------------

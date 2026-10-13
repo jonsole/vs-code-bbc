@@ -36,7 +36,7 @@ class ServerManager {
   }
 
   get ports() {
-    const c = vscode.workspace.getConfiguration('bbcMicro');
+    const c = vscode.workspace.getConfiguration('bbcMicro.server');
     const settings = { dap: c.get('dapPort', DEFAULT_PORTS.dap), http: c.get('httpPort', DEFAULT_PORTS.http) };
     return { ...settings, ...(this.fixedPorts ?? {}) };
   }
@@ -104,15 +104,28 @@ class ServerManager {
     if (!(this.auto && !this.child) && (await this.info())) {
       return this.ports;
     }
+    // A start already under way is shared, but only if it is for these
+    // ports: the settings can change while one starts (the window opened on
+    // a folder with a launch configuration, and its ports were then set).
+    const key = JSON.stringify(this.ports);
+    if (this.starting && this.startingFor !== key && !this.auto) {
+      await this.starting.catch(() => {});
+      return this.ensure();
+    }
     if (!this.starting) {
-      this.starting = this._start().finally(() => (this.starting = null));
+      this.startingFor = key;
+      this.starting = this._start().finally(() => {
+        this.starting = null;
+        this._onDidChange.fire();
+      });
+      this._onDidChange.fire(); // starting: the status bar says so
     }
     await this.starting;
     return this.ports;
   }
 
   _start() {
-    const config = vscode.workspace.getConfiguration('bbcMicro');
+    const config = vscode.workspace.getConfiguration('bbcMicro.server');
     const ports = this.auto ? { dap: 0, http: 0 } : this.ports;
     const { command, args, env } = serverCommand({
       extensionPath: this.context.extensionPath,
@@ -168,37 +181,75 @@ class ServerManager {
     });
   }
 
-  /** Stop the emulator this window started. One adopted from elsewhere is left alone. */
-  async stop() {
+  /**
+   * Stop the emulator: the one this window started, or after asking, one
+   * adopted from elsewhere (another window, a terminal, an MCP client),
+   * found by the pid it gives.
+   */
+  async stop({ ask = true } = {}) {
     const child = this.child;
     if (!child) {
-      if (await this.info()) {
-        vscode.window.showInformationMessage('The running emulator was not started by this window, so it was left running.');
+      const info = await this.info();
+      if (!info || !info.pid) {
+        return false;
       }
-      return false;
+      if (ask) {
+        const choice = await vscode.window.showWarningMessage(
+          `The BBC Micro emulator on port ${this.ports.http} (pid ${info.pid}) was not started by this window. Stop it anyway?`,
+          { modal: true },
+          'Stop It',
+        );
+        if (choice !== 'Stop It') {
+          return false;
+        }
+      }
+      try {
+        process.kill(info.pid);
+      } catch (e) {
+        vscode.window.showErrorMessage(`Could not stop the emulator (pid ${info.pid}): ${e.message}`);
+        return false;
+      }
+      for (let i = 0; i < 20 && (await this.info()); i++) {
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      this._onDidChange.fire();
+      return true;
     }
     await new Promise((resolve) => {
       child.once('exit', resolve);
-      child.kill();
+      endChild(child);
       setTimeout(resolve, 3000);
     });
     return true;
   }
 
+  /** Stop it (asking first if it is not this window's) and start a fresh one. */
   async restart() {
-    await this.stop();
+    if ((this.child || (await this.info())) && !(await this.stop())) {
+      return;
+    }
     await this.ensure();
   }
 
   dispose() {
     if (this.child) {
-      this.child.kill();
+      endChild(this.child);
     }
     if (this.ownsOutput) {
       this.output.dispose();
     }
     this._onDidChange.dispose();
   }
+}
+
+// Closing its stdin lets the emulator exit as it means to, taking its entry
+// out of the registry; kill() alone does not on Windows, where it is
+// TerminateProcess. It is killed if it has not gone in a second.
+function endChild(child) {
+  child.stdin.end();
+  const timer = setTimeout(() => child.kill(), 1000);
+  timer.unref();
+  child.once('exit', () => clearTimeout(timer));
 }
 
 module.exports = { ServerManager };

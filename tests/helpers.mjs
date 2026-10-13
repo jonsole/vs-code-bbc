@@ -45,7 +45,8 @@ export async function startServer(extraArgs = [], { ports } = {}) {
         httpPort,
         child,
         stderr: () => stderr,
-        stop: () => new Promise((r) => (child.exitCode !== null ? r() : (child.once("exit", r), child.kill()))),
+        // Killed on Windows, a child has a signalCode but no exitCode.
+        stop: () => new Promise((r) => (child.exitCode !== null || child.signalCode !== null ? r() : (child.once("exit", r), child.kill()))),
     };
 }
 

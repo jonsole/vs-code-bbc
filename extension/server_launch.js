@@ -73,8 +73,13 @@ function listAdvertised(dir = REGISTRY_DIR) {
       const entry = JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8'));
       process.kill(entry.pid, 0);
       out.push(entry);
-    } catch {
-      // unreadable, or its process has gone
+    } catch (e) {
+      // Unreadable, or its process has gone, when the file goes too: on
+      // Windows a killed emulator cannot take it away itself, and its pid
+      // may soon be another process's.
+      if (e.code === 'ESRCH') {
+        fs.rmSync(path.join(dir, n), { force: true });
+      }
     }
   }
   return out.sort((a, b) => String(a.started).localeCompare(String(b.started)));

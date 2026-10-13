@@ -10,7 +10,12 @@ const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
 const { ServerManager } = require('./server_manager');
-const { ScreenPanel } = require('./screen_panel');
+const { ScreenPanel, pickScreenScaling } = require('./screen_panel');
+const { activateServerView } = require('./server_view');
+const { activateSpeed } = require('./speed_view');
+const { activateRewind } = require('./rewind_view');
+const { activateWatchpoints } = require('./watchpoint_view');
+const { activateProfile } = require('./profile_view');
 const { mcpUrl, claudeMcpAddCommand, mcpJson, listAdvertised, portsFromConfig } = require('./server_launch');
 
 const DEBUG_TYPE = 'bbcmicro';
@@ -18,9 +23,21 @@ const RUNNABLE = /\.(ssd|dsd|uef|bas)$/i;
 
 let server;
 
+// The active BBC Micro debug session, if the active one is: where the speed
+// control, the rewind buttons and the Watchpoints view send their requests.
+function bbcSession() {
+  const session = vscode.debug.activeDebugSession;
+  return session && session.type === DEBUG_TYPE ? session : undefined;
+}
+
 function activate(context) {
   server = new ServerManager(context);
   context.subscriptions.push(server);
+  activateServerView(context, server);
+  activateSpeed(context, bbcSession);
+  activateRewind(context, bbcSession);
+  activateWatchpoints(context, bbcSession);
+  activateProfile(context, bbcSession);
 
   // The emulator each debug session is on: the default one, one on the ports
   // its configuration names (shared by every session naming them), or its
@@ -59,7 +76,7 @@ function activate(context) {
   context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider(DEBUG_TYPE, new ConfigurationProvider()));
   context.subscriptions.push(
     vscode.debug.onDidStartDebugSession((s) => {
-      if (s.type === DEBUG_TYPE && vscode.workspace.getConfiguration('bbcMicro').get('showScreenOnDebug', true)) {
+      if (s.type === DEBUG_TYPE && vscode.workspace.getConfiguration('bbcMicro.screen').get('showOnDebug', true)) {
         ScreenPanel.show(context, sessionServer(s) ?? server);
       }
     }),
@@ -87,7 +104,7 @@ function activate(context) {
     context.subscriptions.push(changed);
     context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration('bbcMicro.httpPort')) {
+        if (e.affectsConfiguration('bbcMicro.server.httpPort')) {
           changed.fire();
         }
       }),
@@ -149,6 +166,22 @@ function activate(context) {
     }
   });
 
+  // The screen panel's title bar: how it is drawn, and the machine's own buttons.
+  command('bbcMicro.screenScaling', pickScreenScaling);
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      // Whoever changed it -- the title-bar button, the Settings editor, a
+      // settings.json edit -- every open panel follows.
+      if (e.affectsConfiguration('bbcMicro.screen')) {
+        ScreenPanel.viewChanged();
+      }
+    }),
+  );
+  const onScreen = () => ScreenPanel.target()?.server ?? server;
+  command('bbcMicro.pressBreak', () => onScreen().request('/api/reset', { hard: false }));
+  command('bbcMicro.powerCycle', () => onScreen().request('/api/reset', { hard: true }));
+  command('bbcMicro.saveSnapshot', saveSnapshot);
+
   command('bbcMicro.runFile', (uri) => startFile(uri, true));
   command('bbcMicro.debugFile', (uri) => startFile(uri, false));
 
@@ -160,8 +193,8 @@ function activate(context) {
     if (text === undefined) {
       return;
     }
-    // The machine on screen: the active session's.
-    const target = ScreenPanel.current?.server ?? server;
+    // The machine on screen: the panel in front, else the active session's.
+    const target = onScreen();
     await target.ensure();
     await target.request('/api/type', { text });
   });
@@ -228,6 +261,32 @@ function activate(context) {
   // Start the emulator in the background so the screen and MCP are there when wanted.
   if (vscode.workspace.workspaceFolders?.some((f) => hasBbcLaunch(f.uri.fsPath))) {
     server.ensure().catch((e) => server.log(e.message));
+  }
+}
+
+// Saves the machine as it is now, in jsbeeb's snapshot format with the
+// disc's contents in it: a moment worth coming back to (MCP's load_snapshot
+// takes it back).
+async function saveSnapshot() {
+  const session = bbcSession();
+  if (!session) {
+    vscode.window.showErrorMessage('Start a BBC Micro debug session first.');
+    return;
+  }
+  const folders = vscode.workspace.workspaceFolders;
+  const chosen = await vscode.window.showSaveDialog({
+    saveLabel: 'Save snapshot',
+    filters: { 'jsbeeb snapshot': ['json'] },
+    defaultUri: folders && folders.length > 0 ? vscode.Uri.joinPath(folders[0].uri, 'snapshot.json') : undefined,
+  });
+  if (!chosen) {
+    return;
+  }
+  try {
+    const body = await session.customRequest('saveSnapshot', { path: chosen.fsPath });
+    vscode.window.showInformationMessage(`Saved ${path.basename(chosen.fsPath)} (${body && body.bytes ? body.bytes + ' bytes' : 'done'}).`);
+  } catch (err) {
+    vscode.window.showErrorMessage(`Could not save the snapshot: ${err.message}`);
   }
 }
 

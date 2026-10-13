@@ -46,7 +46,7 @@ function mcpCall(port, name, args) {
 }
 
 async function run() {
-  const config = vscode.workspace.getConfiguration('bbcMicro');
+  const config = vscode.workspace.getConfiguration('bbcMicro.server');
   const httpPort = Number(process.env.BBC_TEST_HTTP_PORT);
   await config.update('httpPort', httpPort, vscode.ConfigurationTarget.Global);
   await config.update('dapPort', Number(process.env.BBC_TEST_DAP_PORT), vscode.ConfigurationTarget.Global);
@@ -55,7 +55,8 @@ async function run() {
   assert.ok(ext, 'extension is installed');
   await ext.activate();
   const commands = await vscode.commands.getCommands(true);
-  for (const c of ['bbcMicro.showScreen', 'bbcMicro.runFile', 'bbcMicro.copyMcpSetup']) {
+  const declared = ext.packageJSON.contributes.commands.map((c) => c.command);
+  for (const c of declared) {
     assert.ok(commands.includes(c), c);
   }
 
@@ -103,20 +104,53 @@ async function run() {
   assert.match(reply.result.content[0].text, /6417/); // &1911
 
   // The screen panel opened by itself, and frames reach it.
-  await waitFor(() => vscode.window.tabGroups.all.some((g) => g.tabs.some((t) => t.label === 'BBC Micro')), 'the screen panel');
+  await waitFor(() => vscode.window.tabGroups.all.some((g) => g.tabs.some((t) => t.label === 'BBC Micro Screen')), 'the screen panel');
 
   await session.customRequest('continue', { threadId: 1 });
   await waitFor(() => stops.length >= 2, 'the second stop');
   const counter = await session.customRequest('evaluate', { expression: '?counter', context: 'watch' });
   assert.match(counter.result, /^&01 /);
 
+  // The extension's own rewind buttons: Step Back Into goes back one
+  // instruction, and Return to Live comes home.
+  let stopsBefore = stops.length;
+  await vscode.commands.executeCommand('bbcMicro.stepBackInto');
+  await waitFor(() => stops.length > stopsBefore, 'the step back');
+  assert.strictEqual((await session.customRequest('history', {})).live, false);
+  stopsBefore = stops.length;
+  await vscode.commands.executeCommand('bbcMicro.returnToLive');
+  await waitFor(() => stops.length > stopsBefore, 'the return to live');
+  assert.strictEqual((await session.customRequest('history', {})).live, true);
+
+  // The speed the status bar shows is the one the emulator has.
+  assert.deepStrictEqual(await session.customRequest('setSpeed', { multiplier: 0.5 }), { uncapped: false, multiplier: 0.5 });
+  assert.deepStrictEqual(await session.customRequest('setSpeed', { multiplier: 1 }), { uncapped: false, multiplier: 1 });
+
+  // A watchpoint the Watchpoints view lists.
+  const watched = await session.customRequest('setWatchpoint', { address: 'counter', access: 'write', onChange: true });
+  assert.strictEqual(watched.watchpoints[0].symbol, 'counter');
+
   if (process.env.BBC_TEST_SCREENSHOT) {
     // For looking at by eye: the whole window, stopped at the breakpoint with the screen panel open.
     await vscode.commands.executeCommand('workbench.action.splitEditorRight');
     await vscode.commands.executeCommand('bbcMicro.showScreen');
+    await vscode.commands.executeCommand('workbench.view.debug');
     await new Promise((r) => setTimeout(r, 2500));
-    require('child_process').execSync(`import -window root ${JSON.stringify(process.env.BBC_TEST_SCREENSHOT)}`);
+    const shot = process.env.BBC_TEST_SCREENSHOT;
+    if (process.platform === 'win32') {
+      // The primary screen, through .NET: Windows has no `import`.
+      const ps =
+        'Add-Type -AssemblyName System.Windows.Forms,System.Drawing; ' +
+        '$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; ' +
+        '$i = New-Object System.Drawing.Bitmap $b.Width, $b.Height; ' +
+        '[System.Drawing.Graphics]::FromImage($i).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size); ' +
+        `$i.Save('${shot.replace(/'/g, "''")}')`;
+      require('child_process').execFileSync('powershell.exe', ['-NoProfile', '-Command', ps]);
+    } else {
+      require('child_process').execSync(`import -window root ${JSON.stringify(shot)}`);
+    }
   }
+  await session.customRequest('clearWatchpoint', {});
   await vscode.debug.stopDebugging(session);
   vscode.debug.removeBreakpoints(vscode.debug.breakpoints);
 

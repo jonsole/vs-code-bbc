@@ -13,8 +13,13 @@ driven headless.
   watchpoints), step in/over/out (interrupt handlers are run through, not
   stepped into), registers and flags you can edit, the 6502 stack, symbols,
   memory view, and a call stack read off the hardware stack. And backwards:
-  Step Back and Reverse Continue go back through the last minute of what
-  the machine did, exactly.
+  Step Back, Step Back Into and Out, Reverse Continue, Run Back to Cursor and
+  Run Back to Last Write go back through the last minute of what the machine
+  did, exactly. A Watchpoints view, a profiler that tints the hot lines of
+  your source, and a speed control from a thousandth of real time to
+  uncapped. The VS Code side works as the [ZX Spectrum
+  extension's](https://github.com/jonsole/zx-spectrum-emulator) does, with
+  the same commands, views and buttons.
 - **MCP server:** over 60 tools for Claude Code, VS Code's agent mode, or
   any MCP client, modelled on [jsbeeb-mcp](https://github.com/mattgodbolt/jsbeeb-mcp)'s
   interface: run BASIC in one call, run until the prompt or for N frames and
@@ -25,8 +30,9 @@ driven headless.
   profiler, video recording and sound measurement. A debugger window and an
   agent share the one machine.
 - **Screen panel:** the live display with the BBC's keyboard and its sound,
-  plus BREAK, power cycle, pause and warp. It follows the debug session
-  you pick, and **Show Screen of…** opens one on any emulator running.
+  a volume control, and a choice of filter, size and scanlines. It follows
+  the debug session you pick, and **Show Screen of…** opens one on any
+  emulator running.
 - **Programs:** disc images (`.ssd`, `.dsd`, booted with SHIFT-BREAK), tapes
   (`.uef`, CHAINed), BBC BASIC source (`.bas`, tokenised and RUN), and raw
   binaries (loaded at an address and CALLed).
@@ -69,7 +75,8 @@ instead of a second one.
    message five times, and stops at any breakpoint you set in `hello.6502`.
    With [BeebAsm](https://github.com/stardot/beebasm) on your PATH, the
    launch configuration reassembles it first.
-3. **BBC Micro: Show Screen** opens the display; click it to type.
+3. **BBC Micro: Show Screen** opens the display; click it to type, and to
+   let it play the sound.
 
 Right-click a `.ssd`, `.dsd`, `.uef` or `.bas` file in the Explorer to run or
 debug it without a launch configuration.
@@ -140,6 +147,49 @@ same expressions: registers `A X Y S P PC`, flags `C Z I D V N`, symbols,
 
 In the Debug Console, a line starting with `>` is typed at the BBC's keyboard:
 `>*CAT`, `>RUN`.
+
+### In VS Code
+
+As in the ZX Spectrum extension:
+
+- **The debug toolbar** has Step Back Into and Step Back Out beside VS Code's
+  own Step Back and Reverse Continue, Return to Live while the machine is in
+  its past, the speed control, and Start or Stop Profiling.
+- **The status bar** says the emulation speed (click to change it), how far
+  back in its history the machine is (click to return to live), whether a
+  profile is counting, and **BBC Micro**, the emulator: whose it is, with
+  Restart, Stop, Show Screen of… and its log.
+- **The editor's context menu**, while debugging an assembly file: Run Back
+  to Cursor, Run Back to Last Write…, and Watch Address….
+- **BBC Micro Watchpoints**, in the Run and Debug view, lists every
+  watchpoint the emulator has, whoever set it (VS Code's data breakpoints,
+  Watch Address…, an MCP client), with its hits; each can be turned off or
+  removed.
+- **BBC Micro Profile**, in the Run and Debug view: Start Profiling counts
+  where the time goes while the program runs, without stopping it. Hot lines
+  are tinted in the source with their share and cycles a frame beside them
+  (a JSR line includes what its call took, or not: the view's menu says
+  which), a hover has every number, **Show Profile Hot Spots** lists the
+  worst lines and routines, and the view has the call tree by routine and
+  the busiest frames, any of which can be shown on the source alone. Routines
+  can be marked idle (a game's pacing loop, the OS waiting for a key), and a
+  period can be a turn of a routine instead of a frame.
+- **The screen panel** is the picture alone, with a speaker in its corner
+  whose slider sets the volume (kept across reloads; sound plays once you
+  have clicked or typed in the panel). Its title bar has Type Text…, **Screen
+  Scaling…** (nearest neighbour, sharp bilinear or bilinear; fit in whole
+  steps, fit, 1x or 2x of jsbeeb's 896x600 frame; scanlines), Press BREAK,
+  and in its menu Power Off and On, the speed and Save Snapshot….
+- **Settings** are `bbcMicro.server.*` (the ports, the model, which Node) and
+  `bbcMicro.screen.*` (the filter, size and scanlines, and whether a debug
+  session opens the panel).
+
+Not carried over from the Spectrum: its tape pane, the viewer that opens a
+snapshot or tape with Run and Debug buttons, the trace and graphics viewers,
+the display-write overlay and raster views, and its assembly-language
+features. A panel too small for 1x scales the frame down smoothly, whatever
+the filter: halving it with nearest neighbour would lose MODE 0's columns and
+MODE 7's second field.
 
 ### Keyboard
 

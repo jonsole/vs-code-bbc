@@ -54,9 +54,16 @@ BeebAsm. If you change `hello.6502`, rebuild it with the command at its top.
 | `server/screen_stream.mjs` | The screen panel's frame stream |
 | `server/main.mjs` | Command line, HTTP routes, startup |
 | `extension/` | Starting the server, the debugger and MCP registration, the screen panel, BeebAsm syntax |
+| `extension/*_view.js`, `*_model.js` | The ZX Spectrum extension's views, ported: speed, rewind, watchpoints, the profile, the emulator's status bar item. A `_model.js` has no `vscode` import and is tested from Node (`tests/extension_models.test.mjs`) |
+| `extension/screen_scaling.js` | How big the screen panel draws, through which filter; its functions go into the page as source text |
 
 ## Things that bite
 
+- **The extension matches the ZX Spectrum's** (`zx-spectrum-emulator/vscode-extension`):
+  the same commands, views, buttons and settings, and the same DAP custom
+  requests (`setSpeed`, `history`, `stepBackInto`, `watchpoints`, `profile`,
+  `serverInfo`...) with the same arguments and replies, in cycles where the
+  Spectrum's are in T-states. A feature added to one belongs in the other.
 - **Everything goes through the Engine.** The DAP and MCP front ends never
   touch jsbeeb directly, and both learn about stops from the Engine's
   `stopped` event. A run the server makes for itself (booting, loading,

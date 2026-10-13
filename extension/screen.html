@@ -4,87 +4,140 @@
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{nonce}}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BBC Micro</title>
+<title>BBC Micro Screen</title>
 <style>
-  :root { color-scheme: light dark; }
-  html, body { height: 100%; margin: 0; }
-  body {
-    display: flex; flex-direction: column;
-    background: var(--vscode-editor-background);
-    color: var(--vscode-foreground);
-    font-family: var(--vscode-font-family); font-size: var(--vscode-font-size);
-  }
-  .bar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); flex-wrap: wrap; }
-  button {
-    background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground);
-    border: none; padding: 3px 10px; border-radius: 2px; cursor: pointer; font: inherit;
-  }
-  button:hover { background: var(--vscode-button-secondaryHoverBackground); }
-  button.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-  .status { margin-left: auto; opacity: 0.8; }
-  .stage { flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; outline: none; position: relative; }
-  .stage:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-  canvas { image-rendering: pixelated; background: #000; }
-  .hint { position: absolute; bottom: 8px; left: 0; right: 0; text-align: center; opacity: 0.7; pointer-events: none; }
-  .offline { position: absolute; inset: 0; display: none; flex-direction: column; gap: 10px; align-items: center; justify-content: center; background: var(--vscode-editor-background); }
-  .offline.shown { display: flex; }
+  /* As the ZX Spectrum's screen panel: the picture and nothing else but the
+     speaker. The canvas centres itself with auto margins rather than the
+     body centring it: centring by flex alignment pushes a canvas larger than
+     the panel (a fixed 4x in a small panel) off the top and left, where no
+     scrollbar can reach it. */
+  body { margin: 0; padding: 0; background: #000; display: flex; min-height: 100vh; overflow: auto; outline: none; }
+  canvas { display: block; margin: auto; }
+  /* The speaker button, with the volume slider sliding out beside it on
+     hover. Faint until pointed at, so it keeps out of the picture. */
+  #audio { position: fixed; top: 8px; right: 12px; display: flex; align-items: center; gap: 6px; opacity: .35; }
+  #audio:hover { opacity: 1; }
+  #mute { font: 16px system-ui, sans-serif; background: rgba(0,0,0,.5); color: #fff; border: 1px solid #666; border-radius: 4px; padding: 2px 8px; cursor: pointer; }
+  #volume { width: 0; opacity: 0; margin: 0; transition: width .15s, opacity .15s; }
+  #audio:hover #volume, #volume:focus { width: 96px; opacity: 1; }
 </style>
 </head>
-<body>
-  <div class="bar">
-    <button id="pause" title="Pause or resume the machine">Pause</button>
-    <button id="break" title="BREAK: a soft reset">BREAK</button>
-    <button id="reset" title="Power off and on">Power cycle</button>
-    <button id="warp" title="Run as fast as possible">Warp</button>
-    <button id="type" title="Type text at the keyboard">Type…</button>
-    <button id="sound" title="Play the machine's sound (at real speed)">Sound</button>
-    <span class="status" id="status">Connecting…</span>
-  </div>
-  <div class="stage" id="stage" tabindex="0">
-    <canvas id="screen" width="896" height="600"></canvas>
-    <div class="hint" id="hint">Click here to type on the BBC's keyboard</div>
-    <div class="offline" id="offline">
-      <div>The emulator is not running.</div>
-      <button id="start" class="on">Start the emulator</button>
-    </div>
+<body tabindex="0">
+  <canvas id="screen" aria-label="BBC Micro screen"></canvas>
+  <div id="audio">
+    <input id="volume" type="range" min="0" max="100" step="1" aria-label="Volume" />
+    <button id="mute"></button>
   </div>
 <script nonce="{{nonce}}">
 (function () {
   const vscode = acquireVsCodeApi();
+
+  // ---- the picture ------------------------------------------------------
+  //
+  // Each frame is painted into `source` at jsbeeb's own size, then drawn
+  // into a canvas sized in DEVICE pixels and laid out at exactly that size
+  // in CSS pixels, so the only filtering is the one chosen here -- never the
+  // browser quietly rescaling the element behind it. The functions below are
+  // screen_scaling.js's own, inlined as source; its tests hold them to the
+  // answers this page gets.
+  {{scaling}}
+
+  const FRAME_W = 896;
+  const FRAME_H = 600;
+  const LINES = 300; // a BBC line is two rows of jsbeeb's frame
   const canvas = document.getElementById('screen');
   const ctx = canvas.getContext('2d');
-  const stage = document.getElementById('stage');
-  const statusEl = document.getElementById('status');
-  const hint = document.getElementById('hint');
-  const offline = document.getElementById('offline');
-  let scale = '{{scale}}';
+  const source = document.createElement('canvas');
+  const sourceCtx = source.getContext('2d');
+  // Sharp bilinear's first pass, nearest neighbour up to a whole multiple.
+  const prescaled = document.createElement('canvas');
+  const prescaledCtx = prescaled.getContext('2d');
+  // The scanline gaps, built once per size and darkness and laid over every
+  // frame: one drawImage a frame rather than 300 rectangles.
+  const scanlines = document.createElement('canvas');
+  const scanlinesCtx = scanlines.getContext('2d');
+  let scanlinesShown = false;
+  let view = {{view}};
   let image = null;
-  let lastFrame = -1;
-  let paused = false;
-  let warp = false;
-  const held = new Set();
+  let haveFrame = false;
 
-  function layout() {
-    const w = canvas.width, h = canvas.height;
-    let s;
-    if (scale === 'fit') {
-      s = Math.min((stage.clientWidth - 8) / w, (stage.clientHeight - 8) / h);
-      s = Math.max(0.25, s);
-    } else {
-      s = Number(scale) || 1;
+  function resize() {
+    const l = layoutFor(view.scale, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1, FRAME_W, FRAME_H);
+    if (canvas.width !== l.canvasW || canvas.height !== l.canvasH) {
+      canvas.width = l.canvasW;
+      canvas.height = l.canvasH;
     }
-    // The framebuffer has square-ish pixels already: draw it at its own aspect.
-    canvas.style.width = Math.floor(w * s) + 'px';
-    canvas.style.height = Math.floor(h * s) + 'px';
+    canvas.style.width = l.cssW + 'px';
+    canvas.style.height = l.cssH + 'px';
+    buildScanlines();
   }
-  new ResizeObserver(layout).observe(stage);
 
+  // The gaps are measured from the canvas the picture is drawn into, not
+  // from the scale it was asked for, so they fall exactly between its lines
+  // however the size was rounded.
+  function buildScanlines() {
+    const rowHeight = canvas.height / LINES;
+    scanlinesShown = view.scanlines > 0 && scanlinesPossible(rowHeight);
+    if (!scanlinesShown) return;
+    if (scanlines.width !== canvas.width || scanlines.height !== canvas.height) {
+      scanlines.width = canvas.width;
+      scanlines.height = canvas.height;
+    }
+    scanlinesCtx.clearRect(0, 0, scanlines.width, scanlines.height);
+    scanlinesCtx.fillStyle = 'rgba(0, 0, 0, ' + view.scanlines / 100 + ')';
+    const band = scanlineBand(rowHeight);
+    for (let line = 0; line < LINES; line++) {
+      scanlinesCtx.fillRect(0, line * rowHeight + band.offset, scanlines.width, band.height);
+    }
+  }
+
+  function draw() {
+    if (!haveFrame) return;
+    const w = canvas.width;
+    const h = canvas.height;
+    // Set on every draw: resizing a canvas resets its context, smoothing
+    // included. 'low' is Chromium's bilinear -- 'medium' adds mipmaps, which
+    // only matter going down, and 'high' is bicubic.
+    const k = view.filter === 'sharp-bilinear' ? prescaleFactor(w, h, source.width, source.height) : 0;
+    // Smaller than the frame, every filter scales down smoothly: nearest
+    // neighbour could only drop rows, and MODE 7's second field with them.
+    if (w < source.width || h < source.height) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(source, 0, 0, w, h);
+    } else if (view.filter === 'bilinear' || (view.filter === 'sharp-bilinear' && k === 0)) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'low';
+      ctx.drawImage(source, 0, 0, w, h);
+    } else if (view.filter === 'sharp-bilinear') {
+      // Nearest neighbour to the largest whole multiple that fits, then
+      // bilinear for what is left: every pixel stays square and the same
+      // size, and only its edges are blended.
+      if (prescaled.width !== source.width * k || prescaled.height !== source.height * k) {
+        prescaled.width = source.width * k;
+        prescaled.height = source.height * k;
+      }
+      prescaledCtx.imageSmoothingEnabled = false;
+      prescaledCtx.drawImage(source, 0, 0, prescaled.width, prescaled.height);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'low';
+      ctx.drawImage(prescaled, 0, 0, w, h);
+    } else {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(source, 0, 0, w, h);
+    }
+    // After the filter, as a CRT's gaps would be: the dark band is in the
+    // glass, not in the picture being scaled.
+    if (scanlinesShown) ctx.drawImage(scanlines, 0, 0);
+  }
+
+  // A frame is palette indices, or RGB when it had too many colours for a
+  // palette (see frame_decoder.js).
   function paint(f) {
-    if (canvas.width !== f.width || canvas.height !== f.height || !image) {
-      canvas.width = f.width;
-      canvas.height = f.height;
-      image = ctx.createImageData(f.width, f.height);
-      layout();
+    if (source.width !== f.width || source.height !== f.height || !image) {
+      source.width = f.width;
+      source.height = f.height;
+      image = sourceCtx.createImageData(f.width, f.height);
     }
     const out = image.data;
     const px = f.pixels;
@@ -100,99 +153,150 @@
         out[o] = px[p]; out[o + 1] = px[p + 1]; out[o + 2] = px[p + 2]; out[o + 3] = 255;
       }
     }
-    ctx.putImageData(image, 0, 0);
-    lastFrame = f.frame;
+    sourceCtx.putImageData(image, 0, 0);
+    haveFrame = true;
+    draw();
   }
+
+  // Moving the panel between monitors changes the device pixel ratio, and
+  // Chromium reports that as a resize too.
+  window.addEventListener('resize', () => { resize(); draw(); });
+  resize();
+
+  // ---- sound --------------------------------------------------------------
+  //
+  // Samples arrive about every 20ms and have to be played gapless, so each
+  // block is scheduled against a running cursor rather than played on
+  // arrival. An underrun (the machine stopped, then went on) resets the
+  // cursor forward; a cursor drifted too far ahead drops a block to claw
+  // the latency back.
+  const RATE = 44100;
+  const JITTER_S = 0.06;
+  const MAX_AHEAD_S = 0.21;
+  let audioCtx = null;
+  let gainNode = null;
+  let nextStart = 0;
+  // One volume for all of this panel's sound. 0 is mute; the level before a
+  // mute is what the speaker button restores.
+  let volume = {{volume}};
+  let volumeBeforeMute = {{volumeBeforeMute}};
+  // Shaped so that the middle of the slider sounds about half as loud:
+  // loudness follows the square of the amplitude far more closely than the
+  // amplitude itself.
+  function gainFor(percent) {
+    return (percent / 100) * (percent / 100);
+  }
+
+  function ensureAudio() {
+    if (!audioCtx) {
+      audioCtx = new AudioContext({ sampleRate: RATE });
+      gainNode = audioCtx.createGain();
+      gainNode.gain.value = gainFor(volume);
+      gainNode.connect(audioCtx.destination);
+    }
+    // Autoplay policy: the context starts suspended until the user has
+    // interacted with the panel, so this is retried on every gesture.
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  }
+
+  function play(pcm) {
+    // Scheduled even at volume 0, so turning it back up picks up where the
+    // stream is rather than re-seeding the cursor.
+    const actx = ensureAudio();
+    if (actx.state !== 'running' || pcm.length === 0) return; // still waiting on a gesture
+    const buffer = actx.createBuffer(1, pcm.length, RATE);
+    const ch = buffer.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+    const now = actx.currentTime;
+    if (nextStart < now + 0.005) {
+      nextStart = now + JITTER_S; // underrun: re-seed the cursor
+    } else if (nextStart > now + MAX_AHEAD_S) {
+      return; // drifted ahead: drop this block
+    }
+    const src = actx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(gainNode);
+    src.start(nextStart);
+    nextStart += buffer.duration;
+  }
+
+  const muteButton = document.getElementById('mute');
+  const volumeSlider = document.getElementById('volume');
+  function showVolume() {
+    // Muted, one-wave and three-wave speakers, as a volume icon has them.
+    muteButton.innerHTML = volume === 0 ? '&#128263;' : volume < 50 ? '&#128265;' : '&#128266;';
+    muteButton.title = volume === 0 ? 'Unmute (back to ' + volumeBeforeMute + '%)' : 'Mute -- volume ' + volume + '%';
+    volumeSlider.value = String(volume);
+    volumeSlider.title = 'Volume ' + volume + '%';
+    if (gainNode) gainNode.gain.value = gainFor(volume);
+  }
+  // 'persist' is false while a slider is being dragged: every step is heard
+  // at once, but only where it ends up is remembered.
+  function setVolume(percent, persist) {
+    volume = percent;
+    if (percent > 0) volumeBeforeMute = percent;
+    showVolume();
+    vscode.postMessage({ type: 'setVolume', volume: volume, before: volumeBeforeMute, persist: persist });
+  }
+  showVolume();
+  muteButton.addEventListener('click', () => {
+    setVolume(volume === 0 ? (volumeBeforeMute || 100) : 0, true);
+    if (volume > 0) ensureAudio();
+    document.body.focus(); // keep keystrokes going to the BBC
+  });
+  volumeSlider.addEventListener('input', () => setVolume(Number(volumeSlider.value), false));
+  volumeSlider.addEventListener('change', () => {
+    setVolume(Number(volumeSlider.value), true);
+    if (volume > 0) ensureAudio();
+    document.body.focus();
+  });
 
   window.addEventListener('message', (e) => {
     const m = e.data;
     if (m.type === 'frame') {
       paint(m);
-    } else if (m.type === 'status') {
-      statusEl.textContent = m.connected ? 'Connected' : 'Not connected';
-      offline.classList.toggle('shown', !m.connected);
-    } else if (m.type === 'scale') {
-      scale = m.scale;
-      layout();
+    } else if (m.type === 'audio') {
+      play(m.pcm);
+    } else if (m.type === 'view') {
+      view = m.view;
+      resize();
+      draw();
     }
   });
 
+  // ---- keys ---------------------------------------------------------------
+  //
   // Keys go to the BBC by physical position (KeyboardEvent.code), which is
   // what jsbeeb's keyboard map is keyed on: Shift is SHIFT, Backspace DELETE,
-  // End COPY, F12 BREAK, F10 f0 and so on.
+  // End COPY, F12 BREAK, F10 f0 and so on. A key held down is sent once: the
+  // BBC repeats keys itself.
+  const held = new Set();
   function key(e, down) {
     if (e.metaKey) return;
     e.preventDefault();
     e.stopPropagation();
     if (down) {
-      if (held.has(e.code)) return; // auto-repeat: the BBC repeats keys itself
+      ensureAudio(); // the gesture the autoplay policy has been waiting for
+      if (held.has(e.code)) return;
       held.add(e.code);
-    } else {
-      held.delete(e.code);
+    } else if (!held.delete(e.code)) {
+      return;
     }
     vscode.postMessage({ type: 'key', code: e.code, down });
   }
-  stage.addEventListener('keydown', (e) => key(e, true));
-  stage.addEventListener('keyup', (e) => key(e, false));
-  stage.addEventListener('focus', () => (hint.style.display = 'none'));
-  stage.addEventListener('blur', () => {
-    hint.style.display = '';
+  document.body.addEventListener('keydown', (e) => key(e, true));
+  document.body.addEventListener('keyup', (e) => key(e, false));
+  document.body.addEventListener('mousedown', () => ensureAudio());
+  // A lost blur (switching windows mid-keypress) must not leave a key held
+  // down as far as the BBC is concerned.
+  window.addEventListener('blur', () => {
     if (held.size) {
       held.clear();
       vscode.postMessage({ type: 'releaseKeys' });
     }
   });
-  stage.addEventListener('mousedown', () => stage.focus());
-
-  const control = (action, body) => vscode.postMessage({ type: 'control', action, body });
-  document.getElementById('pause').addEventListener('click', (e) => {
-    paused = !paused;
-    control(paused ? 'pause' : 'resume');
-    e.target.textContent = paused ? 'Resume' : 'Pause';
-  });
-  document.getElementById('break').addEventListener('click', () => control('reset', { hard: false }));
-  document.getElementById('reset').addEventListener('click', () => control('reset', { hard: true }));
-  document.getElementById('warp').addEventListener('click', (e) => {
-    warp = !warp;
-    e.target.classList.toggle('on', warp);
-    control('warp', { on: warp });
-  });
-  document.getElementById('type').addEventListener('click', () => control('type'));
-  document.getElementById('start').addEventListener('click', () => control('start'));
-
-  // Sound: samples from the server, played as they come, a little behind so
-  // the stream's gaps don't click. Started by the button, as browsers want.
-  let audio = null;
-  let playAt = 0;
-  document.getElementById('sound').addEventListener('click', (e) => {
-    const on = !audio;
-    if (on) {
-      audio = new AudioContext({ sampleRate: 44100 });
-      playAt = 0;
-    } else {
-      audio.close();
-      audio = null;
-    }
-    e.target.classList.toggle('on', on);
-    vscode.postMessage({ type: 'sound', on });
-  });
-  function play(pcm) {
-    if (!audio) return;
-    const buffer = audio.createBuffer(1, pcm.length, 44100);
-    const ch = buffer.getChannelData(0);
-    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
-    const now = audio.currentTime;
-    // Too far behind (the machine paused, or the panel was busy): start again just ahead.
-    if (playAt < now || playAt > now + 0.3) playAt = now + 0.06;
-    const src = audio.createBufferSource();
-    src.buffer = buffer;
-    src.connect(audio.destination);
-    src.start(playAt);
-    playAt += buffer.duration;
-  }
-  window.addEventListener('message', (e) => {
-    if (e.data.type === 'audio') play(e.data.pcm);
-  });
+  document.body.focus();
 })();
 </script>
 </body>
