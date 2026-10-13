@@ -21,10 +21,11 @@
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { MachineSession } from "../vendor/jsbeeb/src/machine-session.js";
 import { findModel, allModels } from "../vendor/jsbeeb/src/models.js";
-import { keyCodes } from "../vendor/jsbeeb/src/keymap.js";
+import { keyCodes, BBC } from "../vendor/jsbeeb/src/keymap.js";
+import { ATOM } from "../vendor/jsbeeb/src/keymap-atom.js";
 import { compile, parseNumber } from "./expr.mjs";
 import { DebugInfo } from "./debug_info.mjs";
 import { discFor } from "../vendor/jsbeeb/src/fdc.js";
@@ -75,9 +76,10 @@ export function resolveKeyCode(key) {
 }
 
 export class Engine extends EventEmitter {
-    constructor({ model = "B-DFS1.2", warp = false } = {}) {
+    constructor({ model = "B-DFS1.2", warp = false, tube = false } = {}) {
         super();
         this.modelName = model;
+        this.tube = tube;
         this.warp = warp;
         this.session = null;
         this.running = false;
@@ -104,16 +106,17 @@ export class Engine extends EventEmitter {
         await this._create(this.modelName);
     }
 
-    async _create(modelName) {
+    async _create(modelName, { tube = this.tube } = {}) {
         if (!findModel(modelName)) {
             const names = allModels.map((m) => m.synonyms?.[0] ?? m.name).join(", ");
             throw new Error(`Unknown model "${modelName}". Try one of: ${names}`);
         }
         const wasRunning = this.running;
         this._halt();
-        this.session = new MachineSession(modelName);
+        this.session = new MachineSession(modelName, { tube });
         await this.session.initialise();
         this.modelName = modelName;
+        this.tube = tube;
         this.cpu = this.session._machine.processor;
         this.machine = this.session._machine;
         this._lastFrameSeen = this.session.frameCount;
@@ -509,6 +512,23 @@ export class Engine extends EventEmitter {
         return { pc: c.pc, a: c.a, x: c.x, y: c.y, s: c.s, p: c.p.asByte() };
     }
 
+    /** Registers as a person reads them, with the counters that say how far the machine has got. */
+    registerReport() {
+        const r = this.registers();
+        return {
+            pc: this.describeAddress(r.pc),
+            a: hex(r.a, 2),
+            x: hex(r.x, 2),
+            y: hex(r.y, 2),
+            s: hex(r.s, 2),
+            p: hex(r.p, 2),
+            flags: this.flagsString(r.p),
+            instruction: this.disassemble(r.pc).text,
+            frame_count: this.frameCount,
+            elapsed_cycles: this.elapsedCycles,
+        };
+    }
+
     setRegister(name, value) {
         const c = this.cpu;
         const n = name.toLowerCase();
@@ -532,25 +552,36 @@ export class Engine extends EventEmitter {
         return this.cpu.peekmem(address & 0xffff) & 0xff;
     }
 
-    readMemory(address, length, { bank } = {}) {
+    /**
+     * `bank` pages a sideways ROM/RAM bank in at &8000-&BFFF for the access, and
+     * on a Master `shadow` picks shadow (true) or main (false) RAM at
+     * &3000-&7FFF; the map is put back afterwards. Left out, the access sees
+     * what the machine has paged in.
+     */
+    readMemory(address, length, { bank, shadow } = {}) {
         const read = () => {
             const out = new Uint8Array(length);
             for (let i = 0; i < length; i++) out[i] = this.peek(address + i);
             return out;
         };
-        if (bank === undefined) return read();
-        return this.session._withPaging({ bank }, read);
+        if (bank === undefined && shadow === undefined) return read();
+        return this.session._withPaging({ bank, shadow }, read);
     }
 
-    writeMemory(address, bytes, { bank } = {}) {
+    writeMemory(address, bytes, { bank, shadow } = {}) {
         // writemem would fire the write hook, so a watchpoint could stop a machine that is not running.
         const hooked = this._hooksOn.write;
         if (hooked) this.cpu.debugWrite.remove(this._writeHook);
         try {
-            this.session.writeMemory(address, Array.from(bytes), bank === undefined ? {} : { bank });
+            this.session.writeMemory(address, Array.from(bytes), { bank, shadow });
         } finally {
             if (hooked) this.cpu.debugWrite.add(this._writeHook);
         }
+    }
+
+    /** What is paged in: romsel (the sideways bank at &8000), and on a Master acccon (bit 2: shadow RAM at &3000). */
+    paging() {
+        return this.session.pagingState();
     }
 
     _exprContext(extra = {}) {
@@ -675,14 +706,33 @@ export class Engine extends EventEmitter {
         return { width, height, rgba };
     }
 
-    screenshotPng() {
+    /** The visible picture as a PNG, `scale` times its size (nearest neighbour, so pixels stay crisp). */
+    screenshotPng({ scale = 1 } = {}) {
         const { width, height, rgba } = this.frame();
-        return encodePng(rgba, width, height);
+        const k = Math.max(1, Math.min(4, scale | 0));
+        if (k === 1) return encodePng(rgba, width, height);
+        const out = new Uint8Array(width * k * height * k * 4);
+        const src = new Uint32Array(rgba.buffer);
+        const dst = new Uint32Array(out.buffer);
+        for (let y = 0; y < height * k; y++) {
+            const row = ((y / k) | 0) * width;
+            for (let x = 0; x < width * k; x++) dst[y * width * k + x] = src[row + ((x / k) | 0)];
+        }
+        return encodePng(out, width * k, height * k);
     }
 
     /** What is on screen as text (any mode), read from the VDU stream since it was last read. */
     screenText({ clear = false } = {}) {
         return this.session.drainOutput({ clear });
+    }
+
+    /**
+     * The text printed through OSWRCH since the output was last taken, laid out
+     * by where it went on the screen; `clear: false` peeks, leaving it to be
+     * taken again.
+     */
+    takeOutput({ clear = true } = {}) {
+        return this.session.drainOutput({ clear }).screenText.replace(/^\n+/, "");
     }
 
     // -----------------------------------------------------------------------
@@ -710,6 +760,85 @@ export class Engine extends EventEmitter {
         this.session.releaseAllKeys();
     }
 
+    /** The model's own key names and matrix positions: jsbeeb's BBC table, or the Atom's. */
+    get keyTable() {
+        return this.model.isAtom ? ATOM : BBC;
+    }
+
+    /**
+     * Press or release one key straight on the keyboard matrix, with no host
+     * keyboard layout in between: what a game's own keyboard scan reads. Named
+     * one way: `key` (the machine's name: SHIFT, RETURN, COLON_STAR, K1, F0...),
+     * `internal` (as OSBYTE 121 takes, X is 66), `inkey` (negative INKEY, X is
+     * -67) or `col` and `row`. BREAK is not on the matrix: it resets.
+     * Returns the keys that changed, described as keyboardState() does.
+     */
+    pressMatrixKey(selector, down) {
+        if (typeof selector.key === "string" && selector.key.toUpperCase() === "BREAK") {
+            if (down) {
+                this.session.reset(false);
+                this.emit("reset");
+            }
+            return [{ name: "BREAK" }];
+        }
+        const colRow = this._resolveMatrixKey(selector);
+        if (this.typing) {
+            throw new Error("Text is still being typed (a breakpoint stopped it part way): run on to let it finish, or release_all_keys to drop it");
+        }
+        const before = new Set(this.session.heldKeys().map(String));
+        if (down) this.session.keyDownRaw(colRow);
+        else this.session.keyUpRaw(colRow);
+        const after = this.session.heldKeys();
+        const afterSet = new Set(after.map(String));
+        const changed = down ? after.filter((k) => !before.has(String(k))) : [...before].filter((k) => !afterSet.has(k)).map((k) => k.split(",").map(Number));
+        return changed.map((k) => this.describeKey(k));
+    }
+
+    _resolveMatrixKey({ key, internal, inkey, col, row }) {
+        if ((col === undefined) !== (row === undefined)) throw new Error("Give col and row together");
+        const given = [key, internal, inkey, col].filter((v) => v !== undefined).length;
+        if (given !== 1) throw new Error("Give exactly one of key, internal, inkey, or col and row");
+        const table = this.keyTable;
+        if (key !== undefined) {
+            let name = String(key).toUpperCase().replace(/[\s-]+/g, "_");
+            const aliases = { ENTER: "RETURN", CONTROL: "CTRL", CAPS_LOCK: "CAPSLOCK", SHIFT_LOCK: "SHIFTLOCK", ESC: "ESCAPE", BACKSPACE: "DELETE" };
+            name = aliases[name] ?? name;
+            if (/^[0-9]$/.test(name)) name = "K" + name;
+            // The tables are plain objects: "constructor" must not resolve to a function.
+            if (!Object.hasOwn(table, name)) throw new Error(`Unknown key "${key}". The ${this.model.name}'s keys: ${Object.keys(table).join(", ")}`);
+            return table[name];
+        }
+        if (col !== undefined) return [col, row];
+        if (table !== BBC) throw new Error("Internal key numbers are the BBC's; on the Atom give col and row");
+        const number = internal ?? -inkey - 1;
+        if (!(number >= 0 && number <= 0x7f)) throw new Error("internal is 0-127, inkey -1 to -128");
+        return [number & 15, number >> 4];
+    }
+
+    /** A matrix key by position, with its name, and on a BBC its internal and INKEY numbers. */
+    describeKey([col, row]) {
+        const table = this.keyTable;
+        const out = { col, row };
+        const name = Object.keys(table).find((k) => table[k][0] === col && table[k][1] === row);
+        if (name) out.name = name;
+        if (table === BBC) {
+            out.internal = (row << 4) | col;
+            out.inkey = -(out.internal + 1);
+        }
+        return out;
+    }
+
+    keyboardState() {
+        return { held_keys: this.session.heldKeys().map((k) => this.describeKey(k)), typing_pending: this.typing };
+    }
+
+    /** Drop whatever is still to be typed; true if there was any. */
+    cancelTyping() {
+        const was = this.typing;
+        if (was) this.machine.typist.cancel();
+        return was;
+    }
+
     _cancelTypingForKeys() {
         if (this.machine.typist.isTyping) this.machine.typist.cancel();
     }
@@ -727,9 +856,11 @@ export class Engine extends EventEmitter {
     // -----------------------------------------------------------------------
     // Machine control and loading
 
-    async reset({ hard = true, model } = {}) {
-        if (model && model !== this.modelName) {
-            await this._create(model);
+    /** A hard or soft reset; a different model (or second processor) builds a new machine. */
+    async reset({ hard = true, model, tube } = {}) {
+        if (this.typing) this.machine.typist.cancel();
+        if ((model && findModel(model)?.name !== this.model.name) || (tube !== undefined && tube !== this.tube)) {
+            await this._create(model ?? this.modelName, { tube: tube ?? this.tube });
         } else {
             this.session.reset(hard);
         }
@@ -761,6 +892,47 @@ export class Engine extends EventEmitter {
         return stop.reason === "step" && !stop.timedOut ? null : stop;
     }
 
+    /**
+     * Unpaced run until `count` more frames have been painted, stopping on the
+     * paint itself (the first instruction after it): a frame is 40000 cycles
+     * interlaced and 39936 not, so a run measured in cycles drifts against the
+     * picture. Resolves to null, or the stop if something else came first.
+     */
+    async runFrames(count, { limitSeconds } = {}) {
+        const target = this.frameCount + Math.max(1, count | 0);
+        this._startStep({
+            kind: `Run ${count} frame${count === 1 ? "" : "s"}`,
+            done: () => this.session.frameCount >= target,
+            interrupts: true,
+            internal: true,
+            // A machine that has stopped painting would otherwise run forever.
+            limitSeconds: limitSeconds ?? Math.max(1, count * 0.1),
+        });
+        const stop = await this.waitForStop();
+        return stop.reason === "step" && !stop.timedOut ? null : stop;
+    }
+
+    /** Unpaced run for a number of CPU cycles, to within the instruction that finishes it. */
+    async runCycles(cycles) {
+        const until = this.elapsedCycles + Math.max(1, cycles);
+        this._startStep({ kind: `Run ${cycles} cycles`, done: () => this.elapsedCycles >= until, interrupts: true, internal: true, limitSeconds: cycles / this.model.cyclesPerSecond + 1 });
+        const stop = await this.waitForStop();
+        return stop.reason === "step" && !stop.timedOut ? null : stop;
+    }
+
+    /**
+     * Unpaced run until the OS is waiting for a key: back at the BASIC or *
+     * prompt, or a program's INPUT or GET. Anything still being typed is
+     * delivered first. null on arrival, else the stop (timedOut if it never came).
+     */
+    async runUntilPrompt(timeoutSeconds = 60) {
+        if (this.typing) {
+            const stop = await this.runUntilTyped(timeoutSeconds);
+            if (stop) return stop;
+        }
+        return this.runUntil(this.model.idleAddress, timeoutSeconds);
+    }
+
     /** Announce that the machine, already stopped, has stopped somewhere the user asked for. */
     emitStopAt(description, reason = "entry") {
         this._stopped({ reason, description });
@@ -779,6 +951,19 @@ export class Engine extends EventEmitter {
         this.programPath = file;
     }
 
+    /**
+     * A disc from anywhere jsbeeb can find one: a file path, a file: or
+     * http(s): URL, "sth:Acornsoft/Elite.zip" (Stairway to Hell), "hfe:<path>"
+     * (the BBC disc archive) or "bitshifters:<path>". Zips are opened and the
+     * disc inside used. Returns { name, ignored }.
+     */
+    async loadDiscRef(ref, drive = 0) {
+        const isRef = /^(sth|hfe|bitshifters|https?|file):/i.test(ref);
+        const result = await this.session.loadDiscImage(isRef ? ref : pathToFileURL(path.resolve(ref)).href, drive);
+        if (drive === 0) this.programPath = ref;
+        return result;
+    }
+
     async loadTape(file) {
         await this.session.loadTape(file);
         this.programPath = file;
@@ -794,6 +979,12 @@ export class Engine extends EventEmitter {
         this.writeMemory(address, data);
         this.programPath = file;
         return data.length;
+    }
+
+    /** Put back a state from session.snapshot(); breakpoints and the frame counter carry on. */
+    restore(state) {
+        this.session.restore(state);
+        this.emit("reset");
     }
 
     /**

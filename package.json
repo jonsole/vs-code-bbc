@@ -91,7 +91,7 @@
             "properties": {
               "program": {
                 "type": "string",
-                "description": "What to run: a disc (.ssd/.dsd, booted with SHIFT-BREAK), a tape (.uef, CHAINed), BBC BASIC source (.bas, RUN) or a raw binary (give loadAddress)."
+                "description": "What to run: a disc (.ssd/.dsd/.adf, or a zip, booted with SHIFT-BREAK; or a reference such as sth:Acornsoft/Elite.zip), a tape (.uef, CHAINed), BBC BASIC source (.bas, RUN) or a raw binary (give loadAddress)."
               },
               "model": {
                 "type": "string",
@@ -115,6 +115,11 @@
                   "BBC Master 128, ADFS",
                   "BBC Master 128, ANFS"
                 ]
+              },
+              "tube": {
+                "type": "boolean",
+                "default": false,
+                "description": "Fit the second processor the model was sold with: a 65C02 for a BBC B, the 65C102 Turbo for a Master."
               },
               "loadAddress": {
                 "type": "string",

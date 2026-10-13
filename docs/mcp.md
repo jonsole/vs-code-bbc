@@ -4,10 +4,50 @@ Part of the [README](../README.md).
 
 The emulator serves MCP (streamable HTTP) at `http://127.0.0.1:8811/mcp`
 (`--http-port` or the `bbcMicro.httpPort` setting moves it). It is the same
-machine VS Code debugs: a stop an agent causes shows up in VS Code's call
-stack, and a breakpoint VS Code sets stops an agent's `run`. Each side's
-breakpoints are its own: `clear_breakpoint` removes only MCP's, and ending a
-debug session removes only that session's.
+machine VS Code debugs and the screen panel shows: a stop an agent causes
+shows up in VS Code's call stack, and a breakpoint VS Code sets stops an
+agent's run. Each side's breakpoints are its own: `clear_breakpoint` removes
+only MCP's, and ending a debug session removes only that session's.
+
+## Where the interface comes from
+
+The tools follow [jsbeeb-mcp](https://github.com/mattgodbolt/jsbeeb-mcp), the
+MCP server jsbeeb's author wrote for it, wherever it fits:
+
+- **Run tools that hand back what was printed.** `run_until_prompt`,
+  `run_frames`, `run_for_cycles`, `run_to`, `step`, `type_text`,
+  `press_key` and `run_basic` all wait, and all report the same way:
+  `completed`, and if not, `stopped_reason` (`breakpoint`, `watchpoint`,
+  `timeout`, ...) and `stopped`; `registers` with `frame_count` and
+  `elapsed_cycles`; `cycles_run` and `frames_run`; and `output`, the text
+  printed through OSWRCH since output was last taken. `clear: false` peeks
+  without taking it.
+- **`run_frames` stops on the paint itself**, so one call is one new picture;
+  a frame is 40000 cycles interlaced and 39936 not, so stepping by cycles
+  drifts against the display.
+- **Keys on the keyboard matrix**, by the machine's own name (`SHIFT`,
+  `RETURN`, `COLON_STAR`, `K1`), by internal key number (as `OSBYTE 121`
+  and a game's own scan use), by negative INKEY number, or by column and row:
+  exactly the key a game reads, with no host keyboard layout in between.
+  `keyboard_state` and `release_all_keys` keep it in a known state.
+- **Saved states held server-side**: `save_state` once a machine is set up,
+  `restore_state` between attempts; only the id crosses the connection.
+- **Paged memory**: reads report `romsel` (and a Master's `acccon`), and
+  `bank` and `shadow` reach a particular sideways bank or shadow RAM.
+- **Discs from anywhere jsbeeb finds them**: files, zips, URLs, and the
+  Stairway to Hell and BBC disc archives (`sth:Acornsoft/Elite.zip`).
+- **The sound chip**: its registers, and a decoded log of every write.
+- **`run_basic`** for trying a BASIC program in one call.
+
+It differs on purpose in one thing: **there are no sessions** and no
+`create_machine`. There is one machine, shared with VS Code, so an agent and
+a person can work on the same thing. Where the ZX Spectrum emulator has a
+tool for the same job, the name is the ZX one (`get_screen` rather than
+`screenshot`, `get_registers`, `type_text`), and the debugging tools
+(`step`, conditional breakpoints, logpoints, watchpoint ranges,
+`disassemble` with symbols and source lines, `evaluate`) come from there.
+
+## Starting it
 
 Registering the server does not start it. VS Code's agent mode starts it
 through the extension; any other client needs it running first (**BBC Micro:
@@ -21,62 +61,127 @@ symbol from the program's debug info, or an expression (`table+2`). See
 
 ## Tools
 
+`?` marks an optional argument. These tables are generated from
+`server/mcp.mjs`; `tools/list` gives the full schemas.
+
+### The machine
+
 | Tool | Does |
 |---|---|
 | `server_info()` | Which emulator this is: its version, the emulated model, the ports it serves DAP, MCP and the screen on, and the program last loaded. |
 | `get_state()` | The machine at a glance: running or stopped and why, registers and flags, the instruction at PC, breakpoints, watchpoints, a guess at the call stack, and cycles and frames run. |
-| `load_program(path, model?, load_address?, exec_address?, run?, boot?, debug_info?, source?, stop_at?)` | Reset the machine and load a program from a file on this computer, then start it. .ssd/.dsd discs boot with SHIFT-BREAK; .uef tapes are CHAINed; .bas files are BBC BASIC source, tokenised and RUN; anything else is a raw binary that needs load_address (and exec_address if it is not entered at the start). The machine is left running unless stop_at is given or a breakpoint is hit. |
-| `reset(hard?, model?)` | Reset the machine: a power-on (hard) reset by default, or BREAK (hard: false). With model, switch to that model first. Leaves it running. |
-| `run(wait_ms?)` | Let the machine run (in real time) until a breakpoint, a watchpoint or pause. With wait_ms, wait that long for it to stop and say why. |
-| `run_for(seconds?, frames?)` | Run for a span of emulated time as fast as possible, then stop: the quickest way to let a program get somewhere. Breakpoints still stop it early. |
-| `pause()` | Stop a running machine. |
-| `step(count?, mode?)` | Execute instructions and stop. mode "into" (default) runs `count` instructions; "over" runs a JSR to its return; "out" runs to the RTS of the current subroutine. Interrupt handlers are run through as if one instruction. |
-| `run_to(address, timeout_seconds?)` | Run until PC reaches an address (a one-off breakpoint), as fast as possible, giving up after timeout_seconds of emulated time. |
-| `set_breakpoint(address, condition?, hit_count?, log_message?)` | Stop when execution reaches an address. condition is an expression (e.g. "A=&41", "?&70>3", "X<>0 AND C"); log_message makes it a logpoint that records a message ({expressions} in braces) instead of stopping. |
-| `clear_breakpoint(address?)` | Remove MCP's breakpoint at an address, or all of them if no address is given. |
+| `reset(hard?, autoboot?, model?, tube?)` | Reset the machine: power-on (hard, the default) or BREAK (hard: false); model or tube switch to another machine first. autoboot holds SHIFT through the reset (SHIFT-BREAK) to boot the disc in drive 0, and reports shift_held_at_reset. Typing still pending is dropped (cancelled_typing). Leaves the machine running. |
+
+### Loading
+
+| Tool | Does |
+|---|---|
+| `load_program(path, model?, tube?, load_address?, exec_address?, run?, boot?, debug_info?, source?, stop_at?)` | Reset the machine, load a program and start it: the usual way in. .ssd/.dsd/.adf discs (or a zip, or a disc reference as load_disc takes) boot with SHIFT-BREAK; .uef tapes are CHAINed; .bas files are BBC BASIC source, tokenised and RUN; anything else is a raw binary, which needs load_address. Left running unless stop_at is given or a breakpoint stops it. |
+| `load_disc(image, drive?)` | Put a disc in a drive without resetting or booting: from a file here (.ssd, .dsd, .adf, or a zip holding one), a file: or http(s): URL, 'sth:Acornsoft/Elite.zip' (Stairway to Hell), or 'hfe:<path>' (the BBC disc archive). Then type_text '*CAT', '*RUN NAME' or 'CHAIN"NAME"'; a disc in drive 1 is ':1.NAME'. |
+| `boot_disc(image)` | Load a disc (as load_disc takes it) into drive 0 and boot it with SHIFT-BREAK, keeping the model. Leaves the machine running; reports shift_held_at_reset. |
+| `load_basic(source)` | Tokenise BBC BASIC source and put it at PAGE, as if typed in. Does not run it: type_text RUN, then run_until_prompt. |
+| `run_basic(source, model?, timeout_secs?, screenshot?)` | One step for trying BASIC: reset the machine, load the program, RUN it until it waits at a prompt (or timeout_secs of emulated time pass), and return what it printed and a screenshot. The machine is left stopped where the program finished. |
+
+### Running
+
+| Tool | Does |
+|---|---|
+| `run(wait_ms?)` | Let the machine run on in real time, as the screen panel shows it, until a breakpoint, a watchpoint or pause. With wait_ms, wait that long for it to stop and report how. |
+| `pause()` | Stop a running machine where it is. |
+| `run_until_prompt(timeout_secs?, clear?)` | Run until the machine waits for a key: back at the BASIC or * prompt, or a program's INPUT or GET. The way to let something typed (RUN, a *command) finish. Returns what was printed since output was last taken. Anything still being typed is typed first. |
+| `run_frames(count?, clear?)` | Run until another `count` frames have been painted, stopping on the paint itself: one frame is one new picture for get_screen. Use this, not run_for_cycles, to step animation, catch flicker, or let a game move on. Reports frames_run and frame_count, which only climbs. |
+| `run_for_cycles(cycles, clear?)` | Run for a number of CPU cycles (2MHz on a BBC): exact timing, to within the instruction that finishes it. Not for stepping the display (a frame is 40000 cycles interlaced, 39936 not): use run_frames. Reports cycles_run. |
+| `run_to(address, timeout_seconds?)` | Run until PC reaches an address (a one-off breakpoint), giving up after timeout_seconds of emulated time. |
+| `step(count?, mode?)` | Execute instructions and stop. mode "into" (default) runs `count` instructions; "over" runs a JSR to its return; "out" runs to the RTS of the current subroutine. An interrupt taken meanwhile is run through as if it were one instruction. |
+
+### Breakpoints and watchpoints
+
+| Tool | Does |
+|---|---|
+| `set_breakpoint(address, type?, condition?, hit_count?, log_message?)` | Stop when execution reaches an address. condition is an expression ("A=&41", "?&70>3", "X<>0 AND C"); hit_count waits for the nth hit; log_message makes a logpoint that records a message ({expressions} in braces) instead of stopping. type read or write makes it a watchpoint on that address instead, as set_watchpoint does. |
+| `clear_breakpoint(address?, id?)` | Remove one of MCP's breakpoints, by address or by id; with neither, all of them. |
 | `list_breakpoints()` | Every breakpoint and logpoint set, by MCP or by VS Code, with hit counts. |
 | `set_watchpoint(address, length?, access?, condition?)` | Stop when the program reads or writes memory in a range: what changed this? The machine stops after the instruction that did it. condition can test `value`, the byte read or written. |
 | `clear_watchpoint(id?)` | Remove a watchpoint by id, or all of MCP's. |
 | `list_watchpoints()` | Every watchpoint, with hit counts. |
 | `get_log(since?, max?)` | What logpoints have reported, after sequence number `since`. |
-| `read_memory(address, length?, bank?)` | Read memory as the CPU sees it (I/O at &FC00-&FEFF reads as &FF rather than disturbing the hardware), as a hex dump. bank reads a sideways ROM/RAM bank at &8000-&BFFF whether or not it is paged in. |
-| `write_memory(address, data, bank?)` | Write bytes into memory: data is hex, e.g. "A9 41 20 EE FF 60". |
-| `get_registers()` | The 6502's registers and flags. |
+
+### Memory and the CPU
+
+| Tool | Does |
+|---|---|
+| `read_memory(address, length?, bank?, shadow?)` | Read memory as the CPU sees it, as a hex dump, with paging: romsel (the sideways bank at &8000-&BFFF) and on a Master acccon, so a read of paged memory says which bank it came from. bank or shadow read a particular one instead. I/O at &FC00-&FEFF reads as &FF rather than disturbing the hardware. |
+| `write_memory(address, data, bank?, shadow?)` | Write bytes into memory: data is hex ("A9 41 20 EE FF 60") or an array of numbers. bank and shadow as for read_memory. |
+| `save_memory(address, length, path, bank?, shadow?)` | Save a range of memory to a file on this computer: quicker than read_memory for big dumps. bank and shadow as for read_memory. |
+| `get_registers()` | The 6502's registers and flags, the instruction at PC, and the frame and cycle counters. |
 | `set_registers(pc?, a?, x?, y?, s?, p?, c?, z?, i?, d?, v?, n?)` | Change registers or flags while stopped: any of pc, a, x, y, s, p, and the flags c z i d v n (0 or 1). Values may be expressions or symbols. |
-| `disassemble(address?, count?)` | Disassemble instructions from an address (default PC), with symbols. |
+| `disassemble(address?, count?)` | Disassemble instructions from an address (default PC), with symbols and source lines where known. |
 | `evaluate(expression)` | Evaluate an expression: registers (A X Y S P PC, flags C Z ...), symbols, ?addr for a byte, peekw(addr) for a word, BBC BASIC or C operators. |
-| `get_screen()` | A screenshot of the BBC's display, as a PNG image. |
-| `get_screen_text(clear?)` | The text the program has printed through the OS (OSWRCH), laid out as on screen, in any mode. Programs that write straight to screen memory don't show here: use get_screen for those. |
-| `type_text(text, enter?)` | Type text at the BBC keyboard, followed by RETURN unless enter is false: BASIC lines, *commands, answers to prompts. Waits until it has all been typed. |
-| `key_down(key)` | Hold a key down: a name (RETURN, SHIFT, CTRL, ESCAPE, SPACE, DELETE, COPY, CAPS LOCK, F0-F9, LEFT, UP, ...), a letter or digit, or a KeyboardEvent.code ("KeyZ"). |
-| `key_up(key)` | Release a key held with key_down. |
-| `press_key(key, frames?)` | Press and release a key, holding it for `frames` frames of emulated time (default 5); the machine runs meanwhile. |
+
+### The screen
+
+| Tool | Does |
+|---|---|
+| `get_screen(scale?)` | A screenshot of the last complete frame, as a PNG, with frame_count so a new picture can be told from the same one twice. scale 2 doubles it for a closer look. To see the next frame, run_frames first. |
+| `get_screen_text(clear?)` | The text printed through the OS (OSWRCH) that has not been taken yet, laid out as on screen, in any mode. The run tools take it as they go, so this is what was printed since. Programs writing straight to screen memory don't show here: get_screen does. |
+
+### The keyboard
+
+| Tool | Does |
+|---|---|
+| `type_text(text, enter?)` | Type text at the keyboard, then RETURN unless enter is false: BASIC lines, *commands, answers to prompts. Waits until it has all been typed (run_until_prompt then lets it finish). A breakpoint can stop it part way: completed is false, and the rest is typed as the machine runs on; until then key_down and key_up refuse, and release_all_keys drops it. |
+| `key_down(key?, internal?, inkey?, col?, row?)` | Press and hold a key, straight on the keyboard matrix with no host keyboard layout in between: what a game's own keyboard scan reads. Name it one way: key (the machine's name), internal, inkey, or col and row. Reports the matrix key that went down, with its name and numbers. The machine does not run meanwhile: run, run_frames or press_key let it see the key. |
+| `key_up(key?, internal?, inkey?, col?, row?)` | Release a held key, named any way key_down takes. Reports the matrix keys that came up. |
+| `press_key(key?, internal?, inkey?, col?, row?, frames?, clear?)` | Press a key (named as key_down takes), hold it for `frames` painted frames (default 5) while the machine runs, and release it. |
+| `keyboard_state()` | The keyboard as the machine sees it: every key held, by matrix column and row, name, internal key number and INKEY number; and whether typed text is still pending. |
+| `release_all_keys()` | Release every held key and drop any typing still pending, so the keyboard is in a known state. Reports what was released. |
+
+### Saved states
+
+| Tool | Does |
+|---|---|
+| `save_state(label?)` | Snapshot the whole machine (CPU, RAM, sideways RAM, video, sound, discs, tube) and keep it here under a state_id. Booting and loading are the slow part, so save once and restore_state between attempts. Only the id crosses the connection; free states with delete_state. |
+| `restore_state(state_id)` | Put the machine back to a state from save_state (switching model if need be). Memory, registers and the cycle count rewind; breakpoints and the frame counter carry on. Leaves it stopped. |
+| `list_states()` | The states save_state holds, newest first. |
+| `delete_state(state_id)` | Discard a saved state and free its memory. |
+| `save_snapshot(path)` | Save the whole machine to a file, in jsbeeb's snapshot format with the disc contents included, to keep beyond this server's life. |
+| `load_snapshot(path)` | Restore the machine from a file saved by save_snapshot. Leaves it stopped. |
+
+### Sound
+
+| Tool | Does |
+|---|---|
+| `read_sound_state()` | The SN76489 sound chip's registers: each tone channel's period (and frequency) and volume, the noise register, the latched register and the LFSR. |
+| `start_sound_capture()` | Log every byte written to the sound chip, with its cycle, until stop_sound_capture. Clears any earlier log. |
+| `stop_sound_capture(max_entries?)` | Stop logging sound chip writes and return them decoded (channel, tone or volume, value), the most recent max_entries (default 500). |
+
+### Symbols
+
+| Tool | Does |
+|---|---|
 | `load_debug_info(files, source?, replace?)` | Load symbols (and source lines) for the program: BeebAsm -labels output, a BeebAsm -v listing with its source file, a ca65 .dbg, or a VICE label file. Adds to what is loaded unless replace is true. |
 | `resolve_symbol(name)` | A symbol's address. |
 | `resolve_address(address)` | The nearest symbol to an address, and its source line if known. |
-| `save_snapshot(path)` | Save the whole machine to a file, in jsbeeb's snapshot format, disc contents included. |
-| `load_snapshot(path)` | Restore the machine from a snapshot file saved by save_snapshot or by jsbeeb. Leaves it stopped. |
-
-`?` marks an optional argument. The table is generated from `server/mcp.mjs`
-(`tools/list` gives the full schemas).
 
 ## A typical session
 
-1. `load_program(path="…/build/game.ssd", debug_info=[…labels, …lst], source="…/game.6502", stop_at="main")`
-2. `get_screen()` to see it, `get_screen_text()` for what it printed.
-3. `set_watchpoint(address="lives", access="write")`, `run(wait_ms=10000)`:
-   which instruction changes the lives counter?
-4. `get_state()`, `disassemble()`, `step(mode="over")`.
-5. `press_key(key="Z", frames=10)` or `type_text(text="RUN")` to play it.
+1. `run_basic(source=...)` to try an idea; or
+   `load_program(path="…/build/game.ssd", debug_info=[…labels, …lst], source="…/game.6502", stop_at="main")`.
+2. `save_state(label="title screen")`.
+3. `press_key(key="SPACE")`, `run_frames(count=50)`, `get_screen()`.
+4. `set_watchpoint(address="lives", access="write")`, `run(wait_ms=10000)`:
+   which instruction changes the lives counter? `disassemble()`, `step(mode="over")`.
+5. `restore_state(state_id=...)` and try again.
 
 ## Notes
 
-- The machine runs in real time (`run`); `run_for`, `run_to`, `step` and
-  loading run as fast as they can.
-- Reading memory never touches I/O: `&FC00`–`&FEFF` reads as `&FF` rather
+- `run` lets the machine go on in real time, as the screen panel shows it.
+  Every other run tool runs as fast as it can and leaves the machine stopped.
+- Reading memory never touches I/O: `&FC00`-`&FEFF` reads as `&FF` rather
   than clearing a VIA's flags.
-- `get_screen_text` follows what the program printed through OSWRCH, laid out
-  as the screen is; it does not see a program writing to screen memory
-  directly. `get_screen` always does.
-- Snapshots are in jsbeeb's own snapshot format, with the disc's contents
-  kept in them, so the file alone brings the machine back.
+- `output` and `get_screen_text` follow what was printed through OSWRCH,
+  laid out as the screen is; they do not see a program writing to screen
+  memory directly. `get_screen` always does.
+- `save_snapshot` writes jsbeeb's snapshot format to a file, with the disc
+  contents in it; `save_state` keeps states in the server's memory, at most
+  100, and they are gone when it stops.

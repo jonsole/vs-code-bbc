@@ -245,7 +245,8 @@ export class DapSession {
     }
 
     async _start(args) {
-        const program = args.program ? path.resolve(args.cwd ?? ".", args.program) : undefined;
+        // A disc reference (sth:..., https:...) is not a path.
+        const program = !args.program ? undefined : /^(sth|hfe|bitshifters|https?|file):/i.test(args.program) ? args.program : path.resolve(args.cwd ?? ".", args.program);
         let stopAt = args.stopAt;
         const kind = program ? programKind(program) : "none";
         if (args.stopOnEntry && stopAt === undefined && kind === "binary") stopAt = args.execAddress ?? args.loadAddress;

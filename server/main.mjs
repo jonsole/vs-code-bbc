@@ -7,7 +7,7 @@
 //                               /screen.png, /api/*  a screenshot and the panel's controls
 //
 // Usage: node server/main.mjs [--dap-port N] [--http-port N] [--host H]
-//                             [--model B-DFS1.2] [--warp] [--paused]
+//                             [--model B-DFS1.2] [--tube] [--warp] [--paused]
 //                             [--program FILE [--load-address A] [--exec-address A]]
 //
 // Prints one JSON line {"ready":true,...} to stdout once it is listening, and
@@ -49,6 +49,9 @@ function parseArgs(argv) {
             case "--warp":
                 opts.warp = true;
                 break;
+            case "--tube":
+                opts.tube = true;
+                break;
             case "--paused":
                 opts.paused = true;
                 break;
@@ -87,7 +90,7 @@ const jsbeebInfo = (() => {
     }
 })();
 
-const engine = new Engine({ model: opts.model, warp: opts.warp });
+const engine = new Engine({ model: opts.model, warp: opts.warp, tube: !!opts.tube });
 await engine.init();
 const started = new Date().toISOString();
 
@@ -96,6 +99,7 @@ const serverInfo = () => ({
     version,
     emulator: `jsbeeb ${jsbeebInfo ?? ""}`.trim(),
     model: engine.model.name,
+    tube: engine.tube,
     pid: process.pid,
     started,
     ports: { dap: opts.dapPort, http: opts.httpPort },

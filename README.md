@@ -13,11 +13,13 @@ driven headless.
   watchpoints), step in/over/out (interrupt handlers are run through, not
   stepped into), registers and flags you can edit, the 6502 stack, symbols,
   memory view, and a call stack read off the hardware stack.
-- **MCP server:** about 30 tools (load a program, run, pause, step, set
-  breakpoints and watchpoints, read and write memory and registers,
-  disassemble, type at the keyboard, press keys, screenshot, read the text on
-  screen, save and load snapshots) for Claude Code, VS Code's agent mode, or
-  any MCP client. A debugger window and an agent can share the one machine.
+- **MCP server:** about 50 tools for Claude Code, VS Code's agent mode, or
+  any MCP client, modelled on [jsbeeb-mcp](https://github.com/mattgodbolt/jsbeeb-mcp)'s
+  interface: run BASIC in one call, run until the prompt or for N frames and
+  get back what was printed, press keys on the keyboard matrix by name or
+  internal number, save and restore states, read the sound chip, plus
+  breakpoints, watchpoints, stepping, memory, registers, disassembly and
+  screenshots. A debugger window and an agent share the one machine.
 - **Screen panel:** the live display with the BBC's keyboard, plus BREAK,
   power cycle, pause and warp.
 - **Programs:** disc images (`.ssd`, `.dsd`, booted with SHIFT-BREAK), tapes
@@ -93,8 +95,9 @@ debug in the disassembly view.
 
 | Attribute | |
 |---|---|
-| `program` | `.ssd`/`.dsd` (SHIFT-BREAK), `.uef` (`*TAPE`, `CHAIN""`), `.bas` (RUN), or a raw binary |
+| `program` | `.ssd`/`.dsd`/`.adf` or a zip (SHIFT-BREAK), `.uef` (`*TAPE`, `CHAIN""`), `.bas` (RUN), or a raw binary; a disc can also be `sth:Acornsoft/Elite.zip` or a URL |
 | `model` | `B-DFS1.2` (default), `B-DFS0.9`, `B1770`, `B1770A`, `Master`, `MasterADFS`, `MasterANFS` |
+| `tube` | Fit the second processor (65C02, or the Master's 65C102 Turbo) |
 | `loadAddress`, `execAddress` | Raw binaries: where it goes, where it starts (`&1900`, `$1900`, `0x1900`) |
 | `run` | What to type to start it instead, e.g. `"*RUN GAME"` or `"CHAIN \"MENU\""` |
 | `debugInfo`, `source` | Symbols and line info, as above |

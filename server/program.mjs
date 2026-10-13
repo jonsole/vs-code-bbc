@@ -21,9 +21,12 @@ function addressOf(engine, value, what) {
     return n & 0xffff;
 }
 
+const DiscRef = /^(sth|hfe|bitshifters|https?|file):/i;
+
 export function programKind(file) {
+    if (DiscRef.test(file)) return "disc";
     const ext = path.extname(file).toLowerCase();
-    if (ext === ".ssd" || ext === ".dsd") return "disc";
+    if ([".ssd", ".dsd", ".adf", ".adl", ".zip"].includes(ext)) return "disc";
     if (ext === ".uef") return "tape";
     if (ext === ".bas" || ext === ".txt" || ext === ".bbc") return "basic";
     return "binary";
@@ -62,9 +65,9 @@ function arrived(engine, stop, stopAt) {
 
 async function load(engine, opts) {
     const program = opts.program && path.resolve(opts.program);
-    if (program && !fs.existsSync(program)) throw new Error(`No such file: ${program}`);
+    if (program && !DiscRef.test(program) && !fs.existsSync(program)) throw new Error(`No such file: ${program}`);
     engine.pause("Loading", { internal: true });
-    await engine.reset({ hard: true, model: opts.model });
+    await engine.reset({ hard: true, model: opts.model, tube: opts.tube });
     engine.clearDebugInfo();
     if (opts.debugInfo?.length) engine.loadDebugInfo(opts.debugInfo, { source: opts.source });
 
@@ -81,8 +84,8 @@ async function load(engine, opts) {
 
     switch (kind) {
         case "disc": {
-            engine.loadDisc(program);
-            description = `Disc ${path.basename(program)} in drive 0`;
+            const { name } = await engine.loadDiscRef(program);
+            description = `Disc ${name ?? path.basename(program)} in drive 0`;
             if (boot) {
                 if (opts.run) typed = opts.run;
                 else {
