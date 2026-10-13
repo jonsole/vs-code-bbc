@@ -38,6 +38,10 @@ import { encodePng } from "./png.mjs";
 import { VduTranscript } from "./vdu_transcript.mjs";
 import { fontIndex, readScreenText, VduVars } from "./screen_text.mjs";
 import { History } from "./rewind.mjs";
+import { Trace } from "./trace.mjs";
+import { VideoRecorder } from "./video.mjs";
+import { Profiler } from "./profiler.mjs";
+import { AudioTap } from "./audio.mjs";
 
 const FbWidth = 1024;
 const FbHeight = 625;
@@ -127,6 +131,11 @@ export class Engine extends EventEmitter {
         this._nextInput = null; // in the past: the next checkpoint holding something done from outside
         this._replaying = false; // a replay to an instant in the past, which prints nothing new
         this._frameOffset = 0; // frames painted by replays, which the frame count leaves out
+        this._trace = null; // the execution trace, open or the last one closed
+        this._paintListeners = new Set(); // called at every frame painted, replays aside
+        this._video = null; // the recording, going or the last one
+        this.ffmpegPath = "ffmpeg";
+        this.profiler = new Profiler(this);
     }
 
     async init() {
@@ -158,6 +167,15 @@ export class Engine extends EventEmitter {
             const base = Date.now();
             this.cpu.cmos.now = () => base + (this.elapsedCycles / this.model.cyclesPerSecond) * 1000;
         }
+        // Every frame painted, for a recording; jsbeeb's own listener first.
+        const video = this.session._video;
+        const paint = video.paint_ext;
+        video.paint_ext = (...args) => {
+            paint(...args);
+            if (!this._replaying) for (const l of this._paintListeners) l();
+        };
+        // The sound it makes, for get_audio and the screen panel.
+        this.audio = new AudioTap(this);
         this._installHooks();
         this._history = new History(this);
         this._history.reset();
@@ -235,6 +253,7 @@ export class Engine extends EventEmitter {
         const stoppedEarly = !this.cpu.execute(cycles);
         if (stoppedEarly) this.cpu.targetCycles = this.cpu.currentCycles;
         this._checkFrame();
+        this.audio.catchUp();
         if (stoppedEarly && this._pendingStop?.reason === "history-input") {
             // Running forward through the past, to where something was done
             // from outside: it is done again, as the checkpoint taken after it.
@@ -247,6 +266,10 @@ export class Engine extends EventEmitter {
             return;
         }
         this._history.afterSlice();
+        if (this._hooksStale) {
+            this._hooksStale = false;
+            this._updateHooks();
+        }
         if (stoppedEarly) {
             const stop = this._pendingStop ?? { reason: "pause", description: "Stopped" };
             if (stop.reason === "step" && this._step?.internal) stop.internal = true;
@@ -379,7 +402,9 @@ export class Engine extends EventEmitter {
 
     _installHooks() {
         this._instrHook = (pc, opcode) => this._onInstruction(pc, opcode);
-        this._readHook = (addr, val) => this._onAccess("read", addr, val);
+        // jsbeeb's zero page and stack reads pass the value third, not second:
+        // those are plain RAM, so read it.
+        this._readHook = (addr, val) => this._onAccess("read", addr, addr < 0x200 ? this.peek(addr) : val);
         this._writeHook = (addr, val) => this._onAccess("write", addr, val);
         this._hooksOn = { instr: false, read: false, write: false };
         this._updateHooks();
@@ -387,10 +412,12 @@ export class Engine extends EventEmitter {
 
     _updateHooks() {
         if (!this.cpu) return;
-        const wantInstr = this._bpByAddress.size > 0 || this._step !== null || this.breakOnInterrupt || this._nextInput !== null;
+        const tracing = !!this._trace?.active;
+        const wantInstr =
+            this._bpByAddress.size > 0 || this._step !== null || this.breakOnInterrupt || this._nextInput !== null || tracing || this.profiler?.active;
         const watches = [...this._watchpoints.values()];
-        const wantRead = watches.some((w) => w.access !== "write");
-        const wantWrite = watches.some((w) => w.access !== "read");
+        const wantRead = tracing || watches.some((w) => w.access !== "write");
+        const wantWrite = tracing || watches.some((w) => w.access !== "read");
         const toggle = (key, want, hook, fn) => {
             if (want === this._hooksOn[key]) return;
             if (want) hook.add(fn);
@@ -422,6 +449,9 @@ export class Engine extends EventEmitter {
             this._pendingStop = { reason: "history-input", checkpoint: this._nextInput };
             return true;
         }
+        // A trace that closes itself leaves its hooks to be taken out after the slice.
+        if (this._trace?.active && this._trace.instruction(pc)) this._hooksStale = true;
+        if (this.profiler.active) this.profiler.instruction(pc, opcode);
         if (this.breakOnInterrupt && !this._step?.internal) {
             const irq = this._irqEntry(this.cpu);
             if (irq) {
@@ -518,6 +548,8 @@ export class Engine extends EventEmitter {
     }
 
     _onAccess(access, addr, val) {
+        if (this._trace?.active) this._trace.access(access === "read" ? "R" : "W", addr, val);
+        if (this._watchpoints.size === 0) return false;
         const hit = this._matchWatch(access, addr, val);
         if (!hit) return false;
         this._watchpoints.get(hit.watchpoint).hits++;
@@ -866,6 +898,12 @@ export class Engine extends EventEmitter {
         for (const l of this._frameListeners) l(n);
     }
 
+    /** Called at every frame painted (not at most once a slice, as onFrame is); replays aside. */
+    onPaint(listener) {
+        this._paintListeners.add(listener);
+        return () => this._paintListeners.delete(listener);
+    }
+
     onFrame(listener) {
         this._frameListeners.add(listener);
         return () => this._frameListeners.delete(listener);
@@ -1065,6 +1103,68 @@ export class Engine extends EventEmitter {
 
     get typing() {
         return this.machine.typist.isTyping;
+    }
+
+    // -----------------------------------------------------------------------
+    // Execution trace (see trace.mjs)
+
+    /** Open a trace file: { path, limit, startPc, watch, symbols }. One at a time. */
+    startTrace(opts) {
+        if (this._trace?.active) throw new Error(`A trace is already being written to ${this._trace.path}: stop_trace first`);
+        this._trace = new Trace(this, opts);
+        this._updateHooks();
+        return this._trace.status();
+    }
+
+    /** Close the trace now, or with `pc`, on reaching that address. */
+    stopTrace({ pc } = {}) {
+        const t = this._trace;
+        if (!t) throw new Error("No trace has been started");
+        if (pc !== undefined && t.active) t.stopPc = pc & 0xffff;
+        else t.close();
+        this._updateHooks();
+        return t.status();
+    }
+
+    traceStatus() {
+        if (!this._trace) return { active: false, rows: 0 };
+        this._trace.flush();
+        return this._trace.status();
+    }
+
+    // -----------------------------------------------------------------------
+    // Profile (see profiler.mjs)
+
+    /** "start" (counting from zero), "stop", or "get"; then the report. */
+    profile(action = "get", { idle, period, lines, routines, treeMinPercent } = {}) {
+        if (action === "start") this.profiler.start({ idle, period });
+        else if (action === "stop") this.profiler.stop();
+        else if (action !== "get") throw new Error('action is "start", "stop" or "get"');
+        this._updateHooks();
+        return this.profiler.report({ lines, routines, treeMinPercent });
+    }
+
+    // -----------------------------------------------------------------------
+    // Video (see video.mjs)
+
+    /** Record every frame painted to a file through ffmpeg: { path, seconds, frames, scale }. */
+    async startVideo(opts) {
+        if (this._video?.active) throw new Error(`Already recording to ${this._video.path}: stop_video first`);
+        const v = new VideoRecorder(this, { ...opts, ffmpeg: this.ffmpegPath });
+        this._video = v;
+        // A missing or failing encoder says so now, not at the end.
+        await new Promise((r) => setTimeout(r, 250));
+        if (v.error) throw new Error(v.error);
+        return v.status();
+    }
+
+    async stopVideo() {
+        if (!this._video) throw new Error("No video has been started");
+        return this._video.stop();
+    }
+
+    videoStatus() {
+        return this._video ? this._video.status() : { active: false, frames: 0 };
     }
 
     // -----------------------------------------------------------------------
@@ -1469,6 +1569,8 @@ export class Engine extends EventEmitter {
     }
 
     dispose() {
+        this._trace?.close();
+        this._video?.stop();
         this._halt();
         this.removeAllListeners();
     }

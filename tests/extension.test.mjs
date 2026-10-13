@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { startServer, tool, Root } from "./helpers.mjs";
 
 const require = createRequire(import.meta.url);
-const { serverCommand, parseReadyLine, claudeMcpAddCommand, mcpJson } = require("../extension/server_launch.js");
+const { serverCommand, parseReadyLine, claudeMcpAddCommand, mcpJson, listAdvertised, portsFromConfig } = require("../extension/server_launch.js");
 const { FrameDecoder } = require("../extension/frame_decoder.js");
 
 test("server command: VS Code's own runtime as Node, or the configured one", () => {
@@ -71,4 +71,24 @@ test("package.json points at files that exist", async () => {
     const commands = new Set(pkg.contributes.commands.map((c) => c.command));
     const ext = fs.readFileSync(path.join(Root, "extension/extension.js"), "utf8");
     for (const c of commands) assert.ok(ext.includes(`'${c}'`), `${c} is registered`);
+});
+
+test("more than one emulator: ports in a launch configuration, and every running emulator found", async (t) => {
+    assert.equal(portsFromConfig("auto"), "auto");
+    assert.deepEqual(portsFromConfig({ dap: 4812, http: 8812 }), { dap: 4812, http: 8812 });
+    assert.deepEqual(portsFromConfig({ http: 8812, other: 1 }), { http: 8812 });
+    assert.equal(portsFromConfig(undefined), null);
+    assert.equal(portsFromConfig({ dap: "x" }), null);
+
+    // An emulator on free ports advertises the ports it got, and server_info says where.
+    const server = await startServer([], { ports: 0 });
+    t.after(() => server.stop());
+    const info = await tool(server, "server_info");
+    assert.equal(info.ports.http, server.httpPort);
+    const mine = listAdvertised().find((e) => e.pid === server.child.pid);
+    assert.ok(mine, "listed");
+    assert.deepEqual(mine.ports, { dap: server.dapPort, http: server.httpPort });
+    assert.match(info.advertised_at, new RegExp(`${server.child.pid}\\.json$`));
+    await server.stop();
+    assert.equal(listAdvertised().find((e) => e.pid === server.child.pid), undefined, "gone when it stops");
 });

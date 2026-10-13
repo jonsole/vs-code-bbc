@@ -6,6 +6,8 @@
 'use strict';
 
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
 const DEFAULT_PORTS = { dap: 4811, http: 8811 };
 
@@ -54,4 +56,45 @@ function mcpJson(ports) {
   return { mcpServers: { 'bbc-micro': { type: 'http', url: mcpUrl(ports) } } };
 }
 
-module.exports = { DEFAULT_PORTS, serverCommand, parseReadyLine, mcpUrl, claudeMcpAddCommand, mcpJson };
+// Where running emulators advertise themselves (see server/registry.mjs).
+const REGISTRY_DIR = path.join(os.tmpdir(), 'bbc-micro-emulators');
+
+// Every emulator advertised on this machine whose process is still there.
+function listAdvertised(dir = REGISTRY_DIR) {
+  let names = [];
+  try {
+    names = fs.readdirSync(dir).filter((n) => n.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const n of names) {
+    try {
+      const entry = JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8'));
+      process.kill(entry.pid, 0);
+      out.push(entry);
+    } catch {
+      // unreadable, or its process has gone
+    }
+  }
+  return out.sort((a, b) => String(a.started).localeCompare(String(b.started)));
+}
+
+// A launch configuration's `ports`: "auto", explicit ports, or the settings' (null).
+function portsFromConfig(ports) {
+  if (ports === 'auto') {
+    return 'auto';
+  }
+  if (ports && typeof ports === 'object') {
+    const out = {};
+    for (const k of ['dap', 'http']) {
+      if (Number.isInteger(ports[k]) && ports[k] > 0 && ports[k] < 65536) {
+        out[k] = ports[k];
+      }
+    }
+    return Object.keys(out).length ? out : null;
+  }
+  return null;
+}
+
+module.exports = { DEFAULT_PORTS, serverCommand, parseReadyLine, mcpUrl, claudeMcpAddCommand, mcpJson, listAdvertised, portsFromConfig, REGISTRY_DIR };

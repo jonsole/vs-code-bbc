@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { allModels } from "../vendor/jsbeeb/src/models.js";
 import { hex, isBanked } from "./engine.mjs";
 import { loadProgram } from "./program.mjs";
+import { measure, wav } from "./audio.mjs";
 
 const ProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const McpOwner = "mcp";
@@ -528,6 +529,69 @@ export function makeTools(engine, serverInfo) {
             run: () => engine.history.status(),
         },
 
+        profile: {
+            description:
+                "Measure where execution time goes. `start` counts from zero: every instruction's address, how often it ran and the cycles it " +
+                "took; `stop` freezes the counts; `get` (the default) just reports. Works on a running machine without pausing it: get the " +
+                "program to the part worth measuring, start, let it run, get. The report: `totals` (instructions, interrupts, cycles, " +
+                "idle and busy cycles, per frame, and frame_cycles, the 40000 a frame has); `lines` (per source line, or per address " +
+                "without debug info, with a JSR's calls_cycles); `routines` (per symbol, or 256-byte page); `call_tree` (by call path, " +
+                "cut at tree_min_percent); `periods` (each frame, or each arrival at the `period` routine: average, busiest, the worst ten " +
+                "with their routines). `idle` names routines whose time is waiting, not work -- a game's pacing loop -- left out of busy " +
+                "time; it and `period` are kept across starts.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    action: { type: "string", enum: ["start", "stop", "get"] },
+                    lines: { type: "integer", minimum: 0, description: "How many of the costliest lines (default 20, 0 for all)" },
+                    routines: { type: "integer", minimum: 0, description: "How many of the costliest routines (default 20, 0 for all)" },
+                    tree_min_percent: { type: "number", minimum: 0, maximum: 100, description: "Leave calls under this share of the time out of the tree (default 2)" },
+                    idle: { type: "array", items: { type: "string" }, description: "Routine names whose time is idle; replaces the list" },
+                    period: { type: "string", description: '"frame" (default), or a routine whose arrival starts each period' },
+                },
+            },
+            run: (a) =>
+                engine.profile(a.action ?? "get", { idle: a.idle, period: a.period, lines: a.lines ?? 20, routines: a.routines ?? 20, treeMinPercent: a.tree_min_percent ?? 2 }),
+        },
+
+        // --- tracing ---------------------------------------------------------
+        start_trace: {
+            description:
+                "Start an execution trace: a tab-separated file with a row for every instruction run -- the cycle it started on, its address " +
+                "(and sideways bank) with symbol, its bytes and disassembly, A X Y S and the flags before it ran, and every memory access it " +
+                "made (R &0070=&2A, W &01F1=&20), its own instruction fetches aside. jsbeeb runs the 6502 an instruction at a time, so this is " +
+                "the trace there is, not a bus-cycle one. Start it, then run or step, then stop_trace; both take effect at once, mid-run " +
+                "included. `pc` holds the trace closed until execution reaches that address, and stop_trace's `pc` closes it on arriving " +
+                "somewhere, so the file holds exactly the path between. It closes itself at `limit` rows. Tracing slows the machine.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    path: { type: "string", description: 'The file; relative to the server\'s working directory. Default "trace.txt"' },
+                    limit: { type: "integer", minimum: 0, description: "Rows (instructions) before it closes itself; default 100000, 0 for no limit" },
+                    pc: { ...addressParam, description: "Record nothing until execution reaches this address. " + addressParam.description },
+                    watch: { ...addressParam, description: "An address whose byte gets a column of its own, before each instruction" },
+                    symbols: { type: "boolean", description: "Name addresses after symbols (default true)" },
+                },
+            },
+            run: (a) =>
+                engine.startTrace({
+                    path: a.path ?? "trace.txt",
+                    limit: a.limit ?? 100000,
+                    startPc: a.pc !== undefined ? addr(a.pc) : undefined,
+                    watch: a.watch !== undefined ? addr(a.watch) : undefined,
+                    symbols: a.symbols !== false,
+                }),
+        },
+        stop_trace: {
+            description: "Close the trace now and say where it went and how many rows it has; with `pc`, close it later instead, on reaching that address.",
+            inputSchema: { type: "object", properties: { pc: addressParam } },
+            run: (a) => engine.stopTrace({ pc: a.pc !== undefined ? addr(a.pc) : undefined }),
+        },
+        trace_status: {
+            description: "Whether a trace is open (or waiting for its start pc), its file and its row count. Safe to poll mid-run.",
+            run: () => engine.traceStatus(),
+        },
+
         set_speed: {
             description:
                 'How fast the machine runs while it runs on its own (run, the screen panel): "realtime" (a real 2MHz BBC) or "uncapped" (as fast as ' +
@@ -837,6 +901,32 @@ export function makeTools(engine, serverInfo) {
                 return { content };
             },
         },
+        start_video: {
+            description:
+                "Record the screen to a video file for a person to watch: every frame the machine paints, 50 a second, encoded by ffmpeg in the " +
+                "format the extension asks for (.mp4 plays everywhere). Start, drive the machine (run, keys, steps), stop_video; both take effect " +
+                "at once, mid-run included. `seconds` or `frames` stops it by itself; `scale` (default 2) is whole-pixel scaling. Frames come " +
+                "only while the machine runs. For a model to look at motion, get_screen with `frames` is the tool. Needs ffmpeg on PATH or " +
+                "the server started with --ffmpeg.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    path: { type: "string", description: 'The file; relative to the server\'s working directory. Default "screen.mp4"' },
+                    seconds: { type: "number", minimum: 0.02, description: "Stop after this much emulated time" },
+                    frames: { type: "integer", minimum: 1, description: "Stop after this many frames" },
+                    scale: { type: "integer", minimum: 1, maximum: 4 },
+                },
+            },
+            run: (a) => engine.startVideo({ path: a.path ?? "screen.mp4", seconds: a.seconds, frames: a.frames, scale: a.scale ?? 2 }),
+        },
+        stop_video: {
+            description: "Stop recording and finish the file: frames, duration_ms, dropped (frames lost to a slow encoder), exit_code.",
+            run: () => engine.stopVideo(),
+        },
+        video_status: {
+            description: "Whether a recording is going, its file, and its frame count so far.",
+            run: () => engine.videoStatus(),
+        },
         get_screen_text: {
             description:
                 "What the screen says now, as rows of text, read from screen memory: MODE 7 exactly, other modes by matching " +
@@ -976,6 +1066,27 @@ export function makeTools(engine, serverInfo) {
                     noise: { register: st.noise, attenuation: st.volume[3] },
                     latched_register: hex(st.latchedRegister, 2),
                     lfsr: hex(st.lfsr, 4),
+                };
+            },
+        },
+        get_audio: {
+            description:
+                "Listen to the machine: the last `duration_ms` of sound it made (default 500, at most 4000), measured -- samples, rms and " +
+                "peak (0-1), and pitch_hz, the fundamental, null when silent or unpitched. `include_wav` adds the sound itself as a WAV, " +
+                "44.1kHz mono. Sound is made while the machine runs; run first (run_frames, say) to have something to hear.",
+            inputSchema: {
+                type: "object",
+                properties: { duration_ms: { type: "integer", minimum: 10, maximum: 4000 }, include_wav: { type: "boolean" } },
+            },
+            run: (a) => {
+                const samples = engine.audio.recent(Math.min(4000, Math.max(10, a.duration_ms ?? 500)));
+                const result = measure(samples);
+                if (!a.include_wav) return result;
+                return {
+                    content: [
+                        { type: "text", text: JSON.stringify(result) },
+                        { type: "audio", data: wav(samples).toString("base64"), mimeType: "audio/wav" },
+                    ],
                 };
             },
         },

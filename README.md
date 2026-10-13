@@ -15,16 +15,18 @@ driven headless.
   memory view, and a call stack read off the hardware stack. And backwards:
   Step Back and Reverse Continue go back through the last minute of what
   the machine did, exactly.
-- **MCP server:** nearly 60 tools for Claude Code, VS Code's agent mode, or
+- **MCP server:** over 60 tools for Claude Code, VS Code's agent mode, or
   any MCP client, modelled on [jsbeeb-mcp](https://github.com/mattgodbolt/jsbeeb-mcp)'s
   interface: run BASIC in one call, run until the prompt or for N frames and
   get back what was printed, press keys on the keyboard matrix by name or
   internal number, save and restore states, read the sound chip, plus
   breakpoints, watchpoints, stepping forwards and back ("who wrote that?"),
-  memory, registers, disassembly and screenshots. A debugger window and an
+  memory, registers, disassembly, screenshots, an execution trace, a
+  profiler, video recording and sound measurement. A debugger window and an
   agent share the one machine.
-- **Screen panel:** the live display with the BBC's keyboard, plus BREAK,
-  power cycle, pause and warp.
+- **Screen panel:** the live display with the BBC's keyboard and its sound,
+  plus BREAK, power cycle, pause and warp. It follows the debug session
+  you pick, and **Show Screen of…** opens one on any emulator running.
 - **Programs:** disc images (`.ssd`, `.dsd`, booted with SHIFT-BREAK), tapes
   (`.uef`, CHAINed), BBC BASIC source (`.bas`, tokenised and RUN), and raw
   binaries (loaded at an address and CALLed).
@@ -107,8 +109,14 @@ debug in the disassembly view.
 | `debugInfo`, `source` | Symbols and line info, as above |
 | `stopOnEntry` | Stop as soon as the program starts |
 | `stopAt` | Stop on arrival at an address or symbol |
+| `ports` | Which emulator: `"auto"` a new one for this session alone, on free ports; `{ "dap": 4812, "http": 8812 }` the one on those ports (started if need be); left out, the usual one |
 
 `attach` debugs whatever the machine is doing now, without resetting it.
+
+Two sessions on the same emulator are two views of one machine, so to debug
+two programs at once give one `"ports": "auto"` (the snippet **BBC Micro:
+Launch on a new emulator**). The screen panel shows the emulator of the
+session picked in the Call Stack view.
 
 ### Expressions
 
@@ -149,11 +157,14 @@ See [docs/mcp.md](docs/mcp.md) for the tools.
 
 ```sh
 node server/main.mjs [--dap-port 4811] [--http-port 8811] [--model Master] [--warp] [--paused] \
-                     [--program game.ssd] [--load-address &1900 --exec-address &1900]
+                     [--program game.ssd] [--load-address &1900 --exec-address &1900] [--ffmpeg PATH]
 ```
 
-Node 22 or later. Besides `/mcp`, it serves `/screen.png` (a screenshot) and
-`/stream` (the screen panel's frame stream).
+Node 22 or later. A port of 0 takes any free one, which the first line it
+prints says. Besides `/mcp`, it serves `/screen.png` (a screenshot), `/stream`
+(the screen panel's frame stream) and `/audio` (its sound, 16-bit mono at
+44.1kHz). `--ffmpeg` names the ffmpeg `start_video` uses, if it is not on the
+PATH.
 
 ## Development
 

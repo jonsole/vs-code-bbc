@@ -4,11 +4,13 @@
 //   DAP   TCP  127.0.0.1:4811   VS Code's debugger
 //   HTTP       127.0.0.1:8811   /mcp     MCP (streamable HTTP) for AI agents
 //                               /stream  the live screen, for VS Code's screen panel
+//                               /audio   its sound, 16-bit mono at 44.1kHz
 //                               /screen.png, /api/*  a screenshot and the panel's controls
 //
-// Usage: node server/main.mjs [--dap-port N] [--http-port N] [--host H]
+// Usage: node server/main.mjs [--dap-port N] [--http-port N] [--host H]   (0: any free port)
 //                             [--model B-DFS1.2] [--tube] [--warp] [--paused]
 //                             [--program FILE [--load-address A] [--exec-address A]]
+//                             [--ffmpeg PATH]
 //
 // Prints one JSON line {"ready":true,...} to stdout once it is listening, and
 // logs to stderr. jsbeeb's own chatter (it logs with console.log) goes to
@@ -22,6 +24,7 @@ import { startDapServer } from "./dap.mjs";
 import { makeTools, handleMcp } from "./mcp.mjs";
 import { serveStream } from "./screen_stream.mjs";
 import { loadProgram } from "./program.mjs";
+import { advertise } from "./registry.mjs";
 
 const stdoutLog = console.log;
 console.log = (...a) => console.error(...a);
@@ -64,12 +67,15 @@ function parseArgs(argv) {
             case "--exec-address":
                 opts.execAddress = next();
                 break;
+            case "--ffmpeg":
+                opts.ffmpeg = next();
+                break;
             case "--exit-with-parent":
                 opts.exitWithParent = true;
                 break;
             case "-h":
             case "--help":
-                stdoutLog(fs.readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 16).join("\n"));
+                stdoutLog(fs.readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 17).join("\n"));
                 process.exit(0);
             default:
                 console.error(`Unknown argument ${a}`);
@@ -92,7 +98,9 @@ const jsbeebInfo = (() => {
 
 const engine = new Engine({ model: opts.model, warp: opts.warp, tube: !!opts.tube });
 await engine.init();
+if (opts.ffmpeg) engine.ffmpegPath = opts.ffmpeg;
 const started = new Date().toISOString();
+let advertisedAt = null;
 
 const serverInfo = () => ({
     name: "bbc_server",
@@ -103,6 +111,7 @@ const serverInfo = () => ({
     pid: process.pid,
     started,
     ports: { dap: opts.dapPort, http: opts.httpPort },
+    advertised_at: advertisedAt,
     mcp: `http://${opts.host}:${opts.httpPort}/mcp`,
     program: engine.programPath,
     debugInfo: engine.debugInfo.sources,
@@ -181,6 +190,19 @@ const httpServer = http.createServer(async (req, res) => {
             return json(res, 200, reply);
         }
         if (url.pathname === "/stream") return serveStream(engine, req, res, { fps: Number(url.searchParams.get("fps") ?? 50) });
+        if (url.pathname === "/audio") {
+            // The sound, live, as 16-bit mono samples at 44.1kHz: only what is
+            // made at real speed, since warp would be noise.
+            res.writeHead(200, { "Content-Type": "application/octet-stream", "Cache-Control": "no-store" });
+            res.socket?.setNoDelay(true);
+            const off = engine.audio.listen((pcm) => {
+                if (engine.warp || engine.speedMultiplier !== 1 || res.writableNeedDrain) return;
+                res.write(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength));
+            });
+            req.on("close", off);
+            res.on("error", off);
+            return;
+        }
         if (url.pathname === "/screen.png") {
             res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "no-store" });
             return res.end(engine.screenshotPng());
@@ -199,11 +221,14 @@ const httpServer = http.createServer(async (req, res) => {
 });
 
 try {
-    await startDapServer(engine, { port: opts.dapPort, host: opts.host, log });
+    const dap = await startDapServer(engine, { port: opts.dapPort, host: opts.host, log });
     await new Promise((resolve, reject) => {
         httpServer.once("error", reject);
         httpServer.listen(opts.httpPort, opts.host, resolve);
     });
+    // Port 0 asks for any free port: from here on, the ones it got.
+    opts.dapPort = dap.address().port;
+    opts.httpPort = httpServer.address().port;
 } catch (e) {
     console.error(`bbc_server: can't listen: ${e.message}`);
     stdoutLog(JSON.stringify({ ready: false, error: e.message, code: e.code }));
@@ -219,6 +244,15 @@ if (opts.program) {
     if (!opts.paused) engine.resume();
 }
 
+advertisedAt = advertise({
+    pid: process.pid,
+    version,
+    model: engine.model.name,
+    ports: { dap: opts.dapPort, http: opts.httpPort },
+    mcp: `http://${opts.host}:${opts.httpPort}/mcp`,
+    started,
+    cwd: process.cwd(),
+});
 log(`DAP on ${opts.host}:${opts.dapPort}, MCP on http://${opts.host}:${opts.httpPort}/mcp`);
 stdoutLog(JSON.stringify({ ready: true, pid: process.pid, dapPort: opts.dapPort, httpPort: opts.httpPort, version }));
 

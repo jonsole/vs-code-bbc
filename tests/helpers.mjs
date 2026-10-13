@@ -18,9 +18,10 @@ async function freePort() {
     });
 }
 
-export async function startServer(extraArgs = []) {
-    const dapPort = await freePort();
-    const httpPort = await freePort();
+/** A server on free ports; with `ports: 0`, it is asked to find them itself and the ready line says which. */
+export async function startServer(extraArgs = [], { ports } = {}) {
+    let dapPort = ports === 0 ? 0 : await freePort();
+    let httpPort = ports === 0 ? 0 : await freePort();
     const child = spawn(process.execPath, [path.join(Root, "server", "main.mjs"), "--dap-port", dapPort, "--http-port", httpPort, ...extraArgs], {
         stdio: ["pipe", "pipe", "pipe"],
     });
@@ -32,6 +33,8 @@ export async function startServer(extraArgs = []) {
             out += d;
             if (out.includes("\n")) {
                 const msg = JSON.parse(out.split("\n")[0]);
+                dapPort = msg.dapPort ?? dapPort;
+                httpPort = msg.httpPort ?? httpPort;
                 msg.ready ? resolve() : reject(new Error(msg.error));
             }
         });

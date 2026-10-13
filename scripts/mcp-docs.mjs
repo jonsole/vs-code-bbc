@@ -16,11 +16,12 @@ const Groups = [
     ["Running", ["run", "pause", "run_until_prompt", "run_frames", "run_for_cycles", "run_to", "step"]],
     ["Going back", ["step_back", "reverse_continue", "run_back_to", "run_back_to_write", "return_to_live", "history_status"]],
     ["Breakpoints and watchpoints", ["set_breakpoint", "clear_breakpoint", "list_breakpoints", "set_watchpoint", "clear_watchpoint", "list_watchpoints", "set_break_on_interrupt", "get_log"]],
+    ["Tracing and profiling", ["start_trace", "stop_trace", "trace_status", "profile"]],
     ["Memory and the CPU", ["read_memory", "write_memory", "save_memory", "set_paging", "get_registers", "set_registers", "disassemble", "evaluate"]],
-    ["The screen", ["get_screen", "get_screen_text"]],
+    ["The screen", ["get_screen", "get_screen_text", "start_video", "stop_video", "video_status"]],
     ["The keyboard", ["type_text", "key_down", "key_up", "press_key", "keyboard_state", "release_all_keys"]],
     ["Saved states", ["save_state", "restore_state", "list_states", "delete_state", "save_snapshot", "load_snapshot"]],
-    ["Sound", ["get_sound_state", "sound_capture"]],
+    ["Sound", ["get_sound_state", "sound_capture", "get_audio"]],
     ["Symbols", ["load_debug_info", "resolve_symbol", "resolve_address"]],
 ];
 

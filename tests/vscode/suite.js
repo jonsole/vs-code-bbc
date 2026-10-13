@@ -119,6 +119,32 @@ async function run() {
   }
   await vscode.debug.stopDebugging(session);
   vscode.debug.removeBreakpoints(vscode.debug.breakpoints);
+
+  // A session on an emulator of its own: a second machine, on free ports,
+  // shown in the screen panel while it is the active session, and gone when
+  // the session ends.
+  const { listAdvertised } = require(path.join(ext.extensionPath, 'extension', 'server_launch.js'));
+  const before = new Set(listAdvertised().map((e) => e.pid));
+  const ownStarted = await vscode.debug.startDebugging(vscode.workspace.workspaceFolders[0], {
+    type: 'bbcmicro',
+    request: 'attach',
+    name: 'own emulator',
+    ports: 'auto',
+  });
+  assert.ok(ownStarted, 'the second session started');
+  const own = vscode.debug.activeDebugSession;
+  const theirs = await waitFor(() => listAdvertised().find((e) => !before.has(e.pid)), 'a new emulator', 60000);
+  assert.notStrictEqual(theirs.ports.http, httpPort);
+  const info = await mcpCall(theirs.ports.http, 'server_info', {});
+  assert.match(info.result.content[0].text, new RegExp(`"pid":\\s*${theirs.pid}\\b`));
+  await waitFor(
+    () => vscode.window.tabGroups.all.some((g) => g.tabs.some((t) => t.label.includes(`on :${theirs.ports.http}`))),
+    'the screen panel on the new emulator',
+  ).catch((e) => {
+    throw new Error(`${e.message}; tabs: ${vscode.window.tabGroups.all.flatMap((g) => g.tabs.map((t) => t.label)).join(' | ')}`);
+  });
+  await vscode.debug.stopDebugging(own);
+  await waitFor(() => !listAdvertised().some((e) => e.pid === theirs.pid), 'the new emulator to stop', 15000);
   await vscode.commands.executeCommand('bbcMicro.serverStop');
   console.log(`BBC suite: passed (${stops.length} stops: ${stops.map((s) => s.reason).join(', ')})`);
 }

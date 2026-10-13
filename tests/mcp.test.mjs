@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { startServer, mcp, tool, Hello, DapClient } from "./helpers.mjs";
 
 const helloDebug = {
@@ -393,4 +394,72 @@ test("MCP and DAP: going back", async (t) => {
     const top = (await dap.request("stackTrace", { threadId: 1 })).stackFrames[0];
     assert.equal(top.instructionPointerReference, "0x3000");
     await dap.request("disconnect", {});
+});
+
+test("MCP: trace, profile, video and sound", async (t) => {
+    const server = await startServer();
+    t.after(() => server.stop());
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bbc-out-"));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    await tool(server, "run_until_prompt");
+    await tool(server, "pause");
+    // main: JSR work / JMP main;  work: LDX #20 / DEX / BNE -1 / STX &70 / RTS
+    await tool(server, "write_memory", { address: "&2000", data: "20 00 30 4C 00 20" });
+    await tool(server, "write_memory", { address: "&3000", data: "A2 14 CA D0 FD 86 70 60" });
+    await tool(server, "set_registers", { pc: "&2000" });
+    const sym = path.join(dir, "prog.sym");
+    fs.writeFileSync(sym, "main = &2000\nwork = &3000\n");
+    await tool(server, "load_debug_info", { files: [sym] });
+
+    // A trace of exactly one call: from work to the instruction after its return.
+    const traceFile = path.join(dir, "trace.txt");
+    let trace = await tool(server, "start_trace", { path: traceFile, pc: "work", watch: "&70" });
+    assert.equal(trace.waiting, true);
+    await tool(server, "stop_trace", { pc: "&2003" });
+    await tool(server, "run_frames", { count: 1 });
+    trace = await tool(server, "trace_status");
+    assert.equal(trace.active, false);
+    assert.equal(trace.ended_by, "reached stop pc");
+    assert.equal(trace.rows, 1 + 20 * 2 + 2); // LDX, 20 x (DEX, BNE), STX, RTS
+    const rows = fs.readFileSync(traceFile, "utf8").split("\n").filter((l) => l && !l.startsWith("#"));
+    assert.equal(rows.length, trace.rows);
+    assert.match(rows[0], /&3000 \(work\)\tA2 14\tLDX #&14/);
+    assert.match(rows.at(-2), /STX &70.*\tW &0070=&00$/);
+    assert.match(rows.at(-1), /RTS.*R &01..=&02/);
+
+    // The profile: nearly all the time is in work, called from main.
+    await tool(server, "profile", { action: "start" });
+    await tool(server, "run_frames", { count: 10 });
+    const profile = await tool(server, "profile", { action: "stop", routines: 3 });
+    assert.equal(profile.routines[0].routine, "work");
+    assert.ok(profile.routines[0].cycles > 0.8 * profile.totals.cycles);
+    assert.equal(profile.call_tree.children[0].name, "work");
+    assert.ok(profile.periods.count >= 10);
+    assert.equal(profile.lines.find((l) => l.symbol === "&2000 (main)").calls_cycles > 0, true);
+
+    // Video, if there is an ffmpeg to make it.
+    const ffmpeg = spawnSync("ffmpeg", ["-version"]).status === 0;
+    if (ffmpeg) {
+        const file = path.join(dir, "screen.mp4");
+        const v = await tool(server, "start_video", { path: file, frames: 10 });
+        assert.equal(v.active, true);
+        await tool(server, "run_frames", { count: 12 });
+        const done = await tool(server, "stop_video");
+        assert.equal(done.frames, 10);
+        assert.equal(done.exit_code, 0);
+        assert.ok(fs.statSync(file).size > 0);
+    }
+
+    // Sound: a note at pitch 89 is about 450Hz on jsbeeb's chip, and an octave up doubles it.
+    await tool(server, "run_basic", { source: "10 SOUND 1,-15,89,20\n20 SOUND 1,-15,137,20" });
+    await tool(server, "run_frames", { count: 30 });
+    let audio = await tool(server, "get_audio", { duration_ms: 200 });
+    assert.ok(audio.rms > 0.01);
+    assert.ok(Math.abs(audio.pitch_hz - 450) < 10, `pitch ${audio.pitch_hz}`);
+    await tool(server, "run_frames", { count: 50 });
+    audio = await tool(server, "get_audio", { duration_ms: 200 });
+    assert.ok(Math.abs(audio.pitch_hz - 900) < 20, `pitch ${audio.pitch_hz}`);
+    const withWav = (await mcp(server, "tools/call", { name: "get_audio", arguments: { duration_ms: 100, include_wav: true } })).result.content;
+    assert.equal(withWav[1].mimeType, "audio/wav");
+    assert.equal(Buffer.from(withWav[1].data, "base64").subarray(0, 4).toString(), "RIFF");
 });

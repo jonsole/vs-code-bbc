@@ -42,6 +42,9 @@ BeebAsm. If you change `hello.6502`, rebuild it with the command at its top.
 |---|---|
 | `server/engine.mjs` | The one live machine: the real-time run loop, stepping, breakpoints, watchpoints, logpoints, call stack, screen, keys, snapshots |
 | `server/rewind.mjs` | The recent past: checkpoints, replay to an exact cycle, and the searches stepping backwards makes |
+| `server/trace.mjs`, `server/profiler.mjs` | The execution trace file, and the profile |
+| `server/video.mjs`, `server/audio.mjs` | Recording the screen through ffmpeg; the sound, measured and streamed |
+| `server/registry.mjs` | Where running emulators advertise themselves, for Show Screen of… |
 | `server/vdu_transcript.mjs`, `server/screen_text.mjs` | What was printed, and what the screen says now |
 | `server/program.mjs` | Loading a disc, tape, BASIC or binary and starting it (shared by DAP launch and MCP `load_program`) |
 | `server/dap.mjs` | The Debug Adapter Protocol over TCP |

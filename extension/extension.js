@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const { ServerManager } = require('./server_manager');
 const { ScreenPanel } = require('./screen_panel');
-const { mcpUrl, claudeMcpAddCommand, mcpJson } = require('./server_launch');
+const { mcpUrl, claudeMcpAddCommand, mcpJson, listAdvertised, portsFromConfig } = require('./server_launch');
 
 const DEBUG_TYPE = 'bbcmicro';
 const RUNNABLE = /\.(ssd|dsd|uef|bas)$/i;
@@ -22,11 +22,36 @@ function activate(context) {
   server = new ServerManager(context);
   context.subscriptions.push(server);
 
+  // The emulator each debug session is on: the default one, one on the ports
+  // its configuration names (shared by every session naming them), or its
+  // own ("ports": "auto"), stopped when the session ends.
+  const sessionServers = new Map(); // session id -> ServerManager
+  const namedServers = new Map(); // "dap:http" -> ServerManager
+  const serverFor = (config) => {
+    const ports = portsFromConfig(config.ports);
+    if (ports === 'auto') {
+      return new ServerManager(context, { auto: true, output: server.output });
+    }
+    if (!ports) {
+      return server;
+    }
+    const key = `${ports.dap ?? ''}:${ports.http ?? ''}`;
+    if (!namedServers.has(key)) {
+      const m = new ServerManager(context, { ports, output: server.output });
+      namedServers.set(key, m);
+      context.subscriptions.push(m);
+    }
+    return namedServers.get(key);
+  };
+  const sessionServer = (s) => (s ? sessionServers.get(s.id) : undefined);
+
   // DAP: the emulator serves it on a TCP port, so the "adapter" is just that port.
   context.subscriptions.push(
     vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, {
-      async createDebugAdapterDescriptor() {
-        const ports = await server.ensure();
+      async createDebugAdapterDescriptor(session) {
+        const m = serverFor(session.configuration);
+        sessionServers.set(session.id, m);
+        const ports = await m.ensure();
         return new vscode.DebugAdapterServer(ports.dap, '127.0.0.1');
       },
     }),
@@ -35,7 +60,23 @@ function activate(context) {
   context.subscriptions.push(
     vscode.debug.onDidStartDebugSession((s) => {
       if (s.type === DEBUG_TYPE && vscode.workspace.getConfiguration('bbcMicro').get('showScreenOnDebug', true)) {
-        ScreenPanel.show(context, server);
+        ScreenPanel.show(context, sessionServer(s) ?? server);
+      }
+    }),
+    // The screen follows the session picked in the Call Stack view or the debug toolbar.
+    vscode.debug.onDidChangeActiveDebugSession((s) => {
+      if (s?.type === DEBUG_TYPE && ScreenPanel.current) {
+        ScreenPanel.current.setServer(sessionServer(s) ?? server);
+      }
+    }),
+    vscode.debug.onDidTerminateDebugSession((s) => {
+      const m = sessionServer(s);
+      sessionServers.delete(s.id);
+      if (m?.auto) {
+        if (ScreenPanel.current?.server === m) {
+          ScreenPanel.current.setServer(server);
+        }
+        m.stop().finally(() => m.dispose());
       }
     }),
   );
@@ -76,6 +117,38 @@ function activate(context) {
     }
   });
 
+  // Any emulator running on this machine, whoever started it: a second panel on it.
+  command('bbcMicro.showScreenOf', async () => {
+    const running = listAdvertised();
+    if (!running.length) {
+      vscode.window.showInformationMessage('No BBC Micro emulator is running on this machine.');
+      return;
+    }
+    const items = await Promise.all(
+      running.map(async (e) => {
+        const m = new ServerManager(context, { ports: e.ports, output: server.output });
+        const info = await m.info();
+        const program = info?.program ? path.basename(String(info.program)) : 'nothing loaded';
+        return {
+          label: `${program} on :${e.ports.http}`,
+          description: info?.model ?? e.model,
+          detail: `DAP ${e.ports.dap}, MCP ${e.mcp}, pid ${e.pid}${e.cwd ? `, in ${e.cwd}` : ''}`,
+          manager: m,
+        };
+      }),
+    );
+    const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Show the screen of which emulator?' });
+    for (const item of items) {
+      if (item !== pick) {
+        item.manager.dispose();
+      }
+    }
+    if (pick) {
+      context.subscriptions.push(pick.manager);
+      ScreenPanel.showPinned(context, pick.manager);
+    }
+  });
+
   command('bbcMicro.runFile', (uri) => startFile(uri, true));
   command('bbcMicro.debugFile', (uri) => startFile(uri, false));
 
@@ -87,8 +160,10 @@ function activate(context) {
     if (text === undefined) {
       return;
     }
-    await server.ensure();
-    await server.request('/api/type', { text });
+    // The machine on screen: the active session's.
+    const target = ScreenPanel.current?.server ?? server;
+    await target.ensure();
+    await target.request('/api/type', { text });
   });
 
   command('bbcMicro.serverStart', async () => {

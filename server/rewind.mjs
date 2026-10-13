@@ -220,6 +220,8 @@ export class History {
             }
         } finally {
             for (const [hook, fn] of hooks) hook.remove(fn);
+            // The sound of the replay is not kept: render it now, while it is still a replay.
+            engine.session._soundChip?.catchUp?.();
             engine._replaying = false;
             engine._suspendHooks(false);
         }

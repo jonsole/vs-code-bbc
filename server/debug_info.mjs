@@ -96,6 +96,13 @@ export class DebugInfo {
         return best ? { name: best.name, offset: address - best.address } : undefined;
     }
 
+    /** The address of the first symbol after an address: where the routine there ends. */
+    nextSymbolAfter(address) {
+        let best;
+        for (const a of this.byAddress.keys()) if (a > address && (best === undefined || a < best)) best = a;
+        return best;
+    }
+
     /** The source line at an address, with `paged` the bank paged in there if it is in &8000-&BFFF. */
     lineFor(address, paged = undefined) {
         if (!this._ours(address & 0xffff, paged)) return undefined;

@@ -167,6 +167,29 @@
               },
               "preLaunchTask": {
                 "type": "string"
+              },
+              "ports": {
+                "description": "Which emulator: \"auto\" starts a new one on free ports for this session alone, stopped when it ends; { \"dap\": 4812, \"http\": 8812 } is the one on those ports, joined if running and started if not. Left out, the one on the bbcMicro.dapPort and bbcMicro.httpPort settings.",
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "auto"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "dap": {
+                        "type": "integer"
+                      },
+                      "http": {
+                        "type": "integer"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
               }
             }
           },
@@ -189,6 +212,29 @@
               "cwd": {
                 "type": "string",
                 "default": "${workspaceFolder}"
+              },
+              "ports": {
+                "description": "Which emulator: \"auto\" starts a new one on free ports for this session alone, stopped when it ends; { \"dap\": 4812, \"http\": 8812 } is the one on those ports, joined if running and started if not. Left out, the one on the bbcMicro.dapPort and bbcMicro.httpPort settings.",
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "auto"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "dap": {
+                        "type": "integer"
+                      },
+                      "http": {
+                        "type": "integer"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
               }
             }
           }
@@ -251,6 +297,17 @@
               "request": "attach",
               "name": "BBC Micro: attach"
             }
+          },
+          {
+            "label": "BBC Micro: Launch on a new emulator",
+            "description": "Its own emulator on free ports, for debugging two programs at once",
+            "body": {
+              "type": "bbcmicro",
+              "request": "launch",
+              "name": "BBC Micro: ${1:main} (own emulator)",
+              "ports": "auto",
+              "program": "^\"\\${workspaceFolder}/${2:build/main.ssd}\""
+            }
           }
         ]
       }
@@ -259,6 +316,12 @@
       {
         "command": "bbcMicro.showScreen",
         "title": "Show Screen",
+        "category": "BBC Micro",
+        "icon": "$(device-desktop)"
+      },
+      {
+        "command": "bbcMicro.showScreenOf",
+        "title": "Show Screen of…",
         "category": "BBC Micro",
         "icon": "$(device-desktop)"
       },
@@ -276,7 +339,7 @@
       },
       {
         "command": "bbcMicro.typeText",
-        "title": "Type Text at the Keyboard\u2026",
+        "title": "Type Text at the Keyboard…",
         "category": "BBC Micro"
       },
       {
@@ -301,7 +364,7 @@
       },
       {
         "command": "bbcMicro.copyMcpSetup",
-        "title": "Copy MCP Setup for Claude Code\u2026",
+        "title": "Copy MCP Setup for Claude Code…",
         "category": "BBC Micro"
       }
     ],

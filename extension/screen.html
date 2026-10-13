@@ -37,6 +37,7 @@
     <button id="reset" title="Power off and on">Power cycle</button>
     <button id="warp" title="Run as fast as possible">Warp</button>
     <button id="type" title="Type text at the keyboard">Type…</button>
+    <button id="sound" title="Play the machine's sound (at real speed)">Sound</button>
     <span class="status" id="status">Connecting…</span>
   </div>
   <div class="stage" id="stage" tabindex="0">
@@ -158,6 +159,40 @@
   });
   document.getElementById('type').addEventListener('click', () => control('type'));
   document.getElementById('start').addEventListener('click', () => control('start'));
+
+  // Sound: samples from the server, played as they come, a little behind so
+  // the stream's gaps don't click. Started by the button, as browsers want.
+  let audio = null;
+  let playAt = 0;
+  document.getElementById('sound').addEventListener('click', (e) => {
+    const on = !audio;
+    if (on) {
+      audio = new AudioContext({ sampleRate: 44100 });
+      playAt = 0;
+    } else {
+      audio.close();
+      audio = null;
+    }
+    e.target.classList.toggle('on', on);
+    vscode.postMessage({ type: 'sound', on });
+  });
+  function play(pcm) {
+    if (!audio) return;
+    const buffer = audio.createBuffer(1, pcm.length, 44100);
+    const ch = buffer.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+    const now = audio.currentTime;
+    // Too far behind (the machine paused, or the panel was busy): start again just ahead.
+    if (playAt < now || playAt > now + 0.3) playAt = now + 0.06;
+    const src = audio.createBufferSource();
+    src.buffer = buffer;
+    src.connect(audio.destination);
+    src.start(playAt);
+    playAt += buffer.duration;
+  }
+  window.addEventListener('message', (e) => {
+    if (e.data.type === 'audio') play(e.data.pcm);
+  });
 })();
 </script>
 </body>

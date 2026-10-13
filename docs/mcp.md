@@ -112,6 +112,53 @@ is playing there is none (a moving tape is not in jsbeeb's snapshots).
 `history_status` says how much there is. VS Code's Step Back and Reverse
 Continue buttons do the same.
 
+## Tracing and profiling
+
+`start_trace` writes a row for every instruction run to a tab-separated
+file: the cycle it started on, its address and symbol, its bytes and
+disassembly, A X Y S and the flags before it, a column for a `watch` address
+if one is given, and every memory access it made with its value (`W
+&0070=&2A`), its own fetches aside. jsbeeb runs the 6502 an instruction at a
+time, so this is an instruction trace rather than the Spectrum's bus-cycle
+one. `pc` holds it closed until execution gets there, and `stop_trace {pc}`
+closes it on arriving somewhere, so the file holds exactly the path between:
+
+```
+start_trace {path: "irq.txt", pc: "&DC1C"}   # the MOS's IRQ handler...
+stop_trace {pc: "&DE89"}                     # ...to its exit
+run_frames {count: 1}
+```
+
+`profile` counts where the time goes on a running machine: `start`, run the
+part worth measuring, `get`. It reports the costliest source lines (or
+addresses, without debug info) and routines, a call tree by call path,
+followed by the stack pointer so code that drops a return address does not
+skew it, and per-frame periods (or per arrival at a routine, for a loop
+longer than a frame) with the ten busiest. Name the routines that only wait
+in `idle` and their time is left out of busy time.
+
+## Video and sound
+
+`get_screen` with `frames` is how a model sees motion. For a person,
+`start_video` records every frame painted, 50 a second, through ffmpeg into
+a file (`.mp4` plays everywhere) until `stop_video`, or by itself after
+`seconds` or `frames`. ffmpeg is found on the PATH, or named with
+`--ffmpeg`.
+
+`get_audio` measures the last stretch of sound the machine made -- `rms`,
+`peak` and `pitch_hz` -- and with `include_wav` hands it back as a WAV. The
+screen panel's **Sound** button plays it live.
+
+## More than one emulator
+
+Each emulator advertises itself, in a file in `bbc-micro-emulators` in the
+system's temporary directory, gone when it stops; `server_info` says where.
+Started with `--dap-port 0 --http-port 0` it takes free ports and says which
+in its ready line and its file. A VS Code launch configuration with
+`"ports": "auto"` gets a new emulator of its own for that session, and
+**BBC Micro: Show Screen of…** opens a panel on any emulator running on the
+machine. Point a second MCP client at the second emulator's port.
+
 ## Starting it
 
 Registering the server does not start it. VS Code's agent mode starts it
@@ -187,6 +234,15 @@ symbol from the program's debug info, or an expression (`table+2`). See
 | `set_break_on_interrupt(enabled)` | Stop a run at the first instruction of the interrupt handler each time the CPU takes an interrupt (IRQ or NMI): for seeing what a handler does, or what it interrupted. The stop's reason is interrupt, and it says where the interrupt came from. |
 | `get_log(since?, max?)` | What logpoints have reported, after sequence number `since`. |
 
+### Tracing and profiling
+
+| Tool | Does |
+|---|---|
+| `start_trace(path?, limit?, pc?, watch?, symbols?)` | Start an execution trace: a tab-separated file with a row for every instruction run -- the cycle it started on, its address (and sideways bank) with symbol, its bytes and disassembly, A X Y S and the flags before it ran, and every memory access it made (R &0070=&2A, W &01F1=&20), its own instruction fetches aside. jsbeeb runs the 6502 an instruction at a time, so this is the trace there is, not a bus-cycle one. Start it, then run or step, then stop_trace; both take effect at once, mid-run included. `pc` holds the trace closed until execution reaches that address, and stop_trace's `pc` closes it on arriving somewhere, so the file holds exactly the path between. It closes itself at `limit` rows. Tracing slows the machine. |
+| `stop_trace(pc?)` | Close the trace now and say where it went and how many rows it has; with `pc`, close it later instead, on reaching that address. |
+| `trace_status()` | Whether a trace is open (or waiting for its start pc), its file and its row count. Safe to poll mid-run. |
+| `profile(action?, lines?, routines?, tree_min_percent?, idle?, period?)` | Measure where execution time goes. `start` counts from zero: every instruction's address, how often it ran and the cycles it took; `stop` freezes the counts; `get` (the default) just reports. Works on a running machine without pausing it: get the program to the part worth measuring, start, let it run, get. The report: `totals` (instructions, interrupts, cycles, idle and busy cycles, per frame, and frame_cycles, the 40000 a frame has); `lines` (per source line, or per address without debug info, with a JSR's calls_cycles); `routines` (per symbol, or 256-byte page); `call_tree` (by call path, cut at tree_min_percent); `periods` (each frame, or each arrival at the `period` routine: average, busiest, the worst ten with their routines). `idle` names routines whose time is waiting, not work -- a game's pacing loop -- left out of busy time; it and `period` are kept across starts. |
+
 ### Memory and the CPU
 
 | Tool | Does |
@@ -206,6 +262,9 @@ symbol from the program's debug info, or an expression (`table+2`). See
 |---|---|
 | `get_screen(scale?, frames?, every?)` | A screenshot of the last complete frame, as a PNG, with its frame number so a new picture can be told from the same one twice. frames > 1 gives that many frames, `every` frames apart (default 1; 50 is a second), each an image tagged with its frame number and time: motion, flicker and animation as still pictures. Taking a sequence runs the machine and leaves it stopped at the last. scale 2 doubles each picture. |
 | `get_screen_text()` | What the screen says now, as rows of text, read from screen memory: MODE 7 exactly, other modes by matching each character cell against the font (inverse text too). A cell that is not a character -- a sprite, graphics, a user-defined character -- shows as ·. Right after a CLS or a scroll, and for programs that write the screen themselves. What was printed, in order, is the run tools' `output` instead. |
+| `start_video(path?, seconds?, frames?, scale?)` | Record the screen to a video file for a person to watch: every frame the machine paints, 50 a second, encoded by ffmpeg in the format the extension asks for (.mp4 plays everywhere). Start, drive the machine (run, keys, steps), stop_video; both take effect at once, mid-run included. `seconds` or `frames` stops it by itself; `scale` (default 2) is whole-pixel scaling. Frames come only while the machine runs. For a model to look at motion, get_screen with `frames` is the tool. Needs ffmpeg on PATH or the server started with --ffmpeg. |
+| `stop_video()` | Stop recording and finish the file: frames, duration_ms, dropped (frames lost to a slow encoder), exit_code. |
+| `video_status()` | Whether a recording is going, its file, and its frame count so far. |
 
 ### The keyboard
 
@@ -235,6 +294,7 @@ symbol from the program's debug info, or an expression (`table+2`). See
 |---|---|
 | `get_sound_state()` | The SN76489 sound chip's registers: each tone channel's period (and frequency) and attenuation, the noise register, the latched register and the LFSR. |
 | `sound_capture(action, max_entries?)` | Log every byte written to the sound chip, with its cycle: action "start" (clearing any earlier log), then "stop" to have them back decoded (channel, tone or volume, value), the most recent max_entries (default 500). |
+| `get_audio(duration_ms?, include_wav?)` | Listen to the machine: the last `duration_ms` of sound it made (default 500, at most 4000), measured -- samples, rms and peak (0-1), and pitch_hz, the fundamental, null when silent or unpitched. `include_wav` adds the sound itself as a WAV, 44.1kHz mono. Sound is made while the machine runs; run first (run_frames, say) to have something to hear. |
 
 ### Symbols
 

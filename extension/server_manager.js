@@ -4,6 +4,10 @@
 // answers on the configured HTTP port, it is adopted rather than a second one
 // started (and not stopped when this window goes). One this window started is
 // tied to it: it reads its stdin from us and exits when that closes.
+//
+// A manager is for one emulator: the one on the settings' ports (the
+// default), one on ports a launch configuration names, or, with "auto", a
+// new one on free ports for one debug session.
 
 'use strict';
 
@@ -13,9 +17,18 @@ const http = require('http');
 const { DEFAULT_PORTS, serverCommand, parseReadyLine } = require('./server_launch');
 
 class ServerManager {
-  constructor(context) {
+  /**
+   * @param {object} [opts]
+   * @param {{dap?: number, http?: number}} [opts.ports] these ports, not the settings'
+   * @param {boolean} [opts.auto] a new emulator on free ports, whatever is running
+   * @param {vscode.OutputChannel} [opts.output] shared with the other managers
+   */
+  constructor(context, { ports, auto = false, output } = {}) {
     this.context = context;
-    this.output = vscode.window.createOutputChannel('BBC Micro Emulator');
+    this.ownsOutput = !output;
+    this.output = output ?? vscode.window.createOutputChannel('BBC Micro Emulator');
+    this.fixedPorts = ports ?? null;
+    this.auto = auto;
     this.child = null;
     this.starting = null;
     this._onDidChange = new vscode.EventEmitter();
@@ -24,7 +37,23 @@ class ServerManager {
 
   get ports() {
     const c = vscode.workspace.getConfiguration('bbcMicro');
-    return { dap: c.get('dapPort', DEFAULT_PORTS.dap), http: c.get('httpPort', DEFAULT_PORTS.http) };
+    const settings = { dap: c.get('dapPort', DEFAULT_PORTS.dap), http: c.get('httpPort', DEFAULT_PORTS.http) };
+    return { ...settings, ...(this.fixedPorts ?? {}) };
+  }
+
+  /** The emulator on the settings' ports, which the commands and MCP registration use. */
+  get isDefault() {
+    return !this.fixedPorts && !this.auto;
+  }
+
+  /** Whether its ports are known: an "auto" one's are not until it has started. */
+  get located() {
+    return !this.auto || !!this.fixedPorts;
+  }
+
+  /** "on :8811", or nothing for the default emulator: for titles. */
+  get where() {
+    return this.isDefault ? '' : `on :${this.ports.http}`;
   }
 
   log(text) {
@@ -71,7 +100,8 @@ class ServerManager {
 
   /** Make sure an emulator is listening; start one if not. Resolves to its ports. */
   async ensure() {
-    if (await this.info()) {
+    // "auto": its own, started the first time; not something else already there.
+    if (!(this.auto && !this.child) && (await this.info())) {
       return this.ports;
     }
     if (!this.starting) {
@@ -83,7 +113,7 @@ class ServerManager {
 
   _start() {
     const config = vscode.workspace.getConfiguration('bbcMicro');
-    const ports = this.ports;
+    const ports = this.auto ? { dap: 0, http: 0 } : this.ports;
     const { command, args, env } = serverCommand({
       extensionPath: this.context.extensionPath,
       nodePath: config.get('nodePath', ''),
@@ -100,6 +130,9 @@ class ServerManager {
       this.log(`Emulator exited (${signal ?? code})`);
       if (this.child === child) {
         this.child = null;
+        if (this.auto) {
+          this.fixedPorts = null; // a restart gets new ports
+        }
       }
       this._onDidChange.fire();
     });
@@ -118,6 +151,9 @@ class ServerManager {
         clearTimeout(timer);
         const ready = parseReadyLine(out);
         if (ready?.ready) {
+          if (this.auto) {
+            this.fixedPorts = { dap: ready.dapPort, http: ready.httpPort };
+          }
           this.log(`Emulator ready: DAP on ${ready.dapPort}, MCP on http://127.0.0.1:${ready.httpPort}/mcp (pid ${ready.pid})`);
           this._onDidChange.fire();
           resolve(ready);
@@ -158,7 +194,9 @@ class ServerManager {
     if (this.child) {
       this.child.kill();
     }
-    this.output.dispose();
+    if (this.ownsOutput) {
+      this.output.dispose();
+    }
     this._onDidChange.dispose();
   }
 }
