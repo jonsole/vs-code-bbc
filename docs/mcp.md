@@ -14,14 +14,18 @@ only MCP's, and ending a debug session removes only that session's.
 The tools follow [jsbeeb-mcp](https://github.com/mattgodbolt/jsbeeb-mcp), the
 MCP server jsbeeb's author wrote for it, wherever it fits:
 
-- **Run tools that hand back what was printed.** `run_until_prompt`,
-  `run_frames`, `run_for_cycles`, `run_to`, `step`, `type_text`,
-  `press_key` and `run_basic` all wait, and all report the same way:
-  `completed`, and if not, `stopped_reason` (`breakpoint`, `watchpoint`,
-  `timeout`, ...) and `stopped`; `registers` with `frame_count` and
-  `elapsed_cycles`; `cycles_run` and `frames_run`; and `output`, the text
-  printed through OSWRCH since output was last taken. `clear: false` peeks
-  without taking it.
+- **Run tools that hand back what was printed.** `run`,
+  `run_until_prompt`, `run_frames`, `run_for_cycles`, `run_to`, `step`,
+  `type_text`, `press_key` and `run_basic` all wait, and all report the same
+  way: `completed`, and if not, `stopped_reason` (`breakpoint`, `watchpoint`,
+  `timeout`, ...) and `stopped`, with a `watch_stop` for a watchpoint;
+  `registers` with `frame_count` and `elapsed_cycles`; `cycles_run` and
+  `frames_run`; and `output`, what was printed since output was last taken.
+  `clear: false` peeks without taking it. These results also come as typed
+  `structuredContent`, their shape declared as the tool's `outputSchema`.
+- **Nothing hangs.** Every one of them has a bound: `run` stops after
+  `timeout_secs` of emulated time (30 by default) with `stopped_reason:
+  "timeout"`, so a breakpoint that is never hit cannot hang the client.
 - **`run_frames` stops on the paint itself**, so one call is one new picture;
   a frame is 40000 cycles interlaced and 39936 not, so stepping by cycles
   drifts against the display.
@@ -39,13 +43,33 @@ MCP server jsbeeb's author wrote for it, wherever it fits:
 - **The sound chip**: its registers, and a decoded log of every write.
 - **`run_basic`** for trying a BASIC program in one call.
 
+## Two kinds of text
+
+- **`output`**, in the run tools' reports, answers *what did that print?* It
+  is a transcript of what went through OSWRCH, in order: newlines as
+  newlines, a form feed (`\f`) where CLS or MODE cleared the screen, VDU
+  parameters (colours, `VDU 31` positions) left out. Being in order, text
+  from before a clear never mixes with text after it.
+- **`get_screen_text`** answers *what does the screen say now?* It reads
+  screen memory: MODE 7 exactly, the other modes by matching each character
+  cell against the font (inverse text too), with `·` for a cell that is not
+  a character. It is right after a CLS or a scroll, and for programs that
+  write the screen themselves.
+
 It differs on purpose in one thing: **there are no sessions** and no
 `create_machine`. There is one machine, shared with VS Code, so an agent and
 a person can work on the same thing. Where the ZX Spectrum emulator has a
 tool for the same job, the name is the ZX one (`get_screen` rather than
 `screenshot`, `get_registers`, `type_text`), and the debugging tools
-(`step`, conditional breakpoints, logpoints, watchpoint ranges,
-`disassemble` with symbols and source lines, `evaluate`) come from there.
+(`step`, conditional breakpoints, logpoints with formats such as `{A:d}`,
+watchpoints that stop only on a change or on a value and say what did it,
+screen sequences, `disassemble` with symbols and source lines, `evaluate`)
+come from there.
+
+With VS Code debugging the same machine, a stop an agent causes shows in its
+call stack without taking the editor over, and a tool that resets the machine
+(`reset`, `load_program`, `run_basic`, `restore_state`, `load_snapshot`) adds
+a `warning` saying so.
 
 ## Starting it
 
@@ -78,7 +102,6 @@ symbol from the program's debug info, or an expression (`table+2`). See
 |---|---|
 | `load_program(path, model?, tube?, load_address?, exec_address?, run?, boot?, debug_info?, source?, stop_at?)` | Reset the machine, load a program and start it: the usual way in. .ssd/.dsd/.adf discs (or a zip, or a disc reference as load_disc takes) boot with SHIFT-BREAK; .uef tapes are CHAINed; .bas files are BBC BASIC source, tokenised and RUN; anything else is a raw binary, which needs load_address. Left running unless stop_at is given or a breakpoint stops it. |
 | `load_disc(image, drive?)` | Put a disc in a drive without resetting or booting: from a file here (.ssd, .dsd, .adf, or a zip holding one), a file: or http(s): URL, 'sth:Acornsoft/Elite.zip' (Stairway to Hell), or 'hfe:<path>' (the BBC disc archive). Then type_text '*CAT', '*RUN NAME' or 'CHAIN"NAME"'; a disc in drive 1 is ':1.NAME'. |
-| `boot_disc(image)` | Load a disc (as load_disc takes it) into drive 0 and boot it with SHIFT-BREAK, keeping the model. Leaves the machine running; reports shift_held_at_reset. |
 | `load_basic(source)` | Tokenise BBC BASIC source and put it at PAGE, as if typed in. Does not run it: type_text RUN, then run_until_prompt. |
 | `run_basic(source, model?, timeout_secs?, screenshot?)` | One step for trying BASIC: reset the machine, load the program, RUN it until it waits at a prompt (or timeout_secs of emulated time pass), and return what it printed and a screenshot. The machine is left stopped where the program finished. |
 
@@ -86,7 +109,7 @@ symbol from the program's debug info, or an expression (`table+2`). See
 
 | Tool | Does |
 |---|---|
-| `run(wait_ms?)` | Let the machine run on in real time, as the screen panel shows it, until a breakpoint, a watchpoint or pause. With wait_ms, wait that long for it to stop and report how. |
+| `run(wait?, timeout_secs?)` | Let the machine run on in real time, as the screen panel shows it, until a breakpoint, a watchpoint or pause, and report how it stopped -- or after timeout_secs of emulated time (default 30), stopped_reason "timeout", so a breakpoint that is never hit cannot hang the call. wait: false starts it and returns at once, to leave a game running. |
 | `pause()` | Stop a running machine where it is. |
 | `run_until_prompt(timeout_secs?, clear?)` | Run until the machine waits for a key: back at the BASIC or * prompt, or a program's INPUT or GET. The way to let something typed (RUN, a *command) finish. Returns what was printed since output was last taken. Anything still being typed is typed first. |
 | `run_frames(count?, clear?)` | Run until another `count` frames have been painted, stopping on the paint itself: one frame is one new picture for get_screen. Use this, not run_for_cycles, to step animation, catch flicker, or let a game move on. Reports frames_run and frame_count, which only climbs. |
@@ -98,10 +121,10 @@ symbol from the program's debug info, or an expression (`table+2`). See
 
 | Tool | Does |
 |---|---|
-| `set_breakpoint(address, type?, condition?, hit_count?, log_message?)` | Stop when execution reaches an address. condition is an expression ("A=&41", "?&70>3", "X<>0 AND C"); hit_count waits for the nth hit; log_message makes a logpoint that records a message ({expressions} in braces) instead of stopping. type read or write makes it a watchpoint on that address instead, as set_watchpoint does. |
+| `set_breakpoint(address, condition?, hit_count?, log_message?)` | Stop when execution reaches an address. condition is an expression ("A=&41", "?&70>3", "X<>0 AND C"); hit_count waits for the nth hit; log_message makes a logpoint that records a message ({expressions} in braces) instead of stopping. To stop on a read or write of memory, set_watchpoint. |
 | `clear_breakpoint(address?, id?)` | Remove one of MCP's breakpoints, by address or by id; with neither, all of them. |
 | `list_breakpoints()` | Every breakpoint and logpoint set, by MCP or by VS Code, with hit counts. |
-| `set_watchpoint(address, length?, access?, condition?)` | Stop when the program reads or writes memory in a range: what changed this? The machine stops after the instruction that did it. condition can test `value`, the byte read or written. |
+| `set_watchpoint(address, length?, access?, on_change?, value?, not_value?, condition?)` | Stop when the program reads or writes memory in a range: what changed this? By default only a write that CHANGES the value stops it (on_change false: every write). value / not_value: only an access of, or not of, that byte; condition: any expression, with `value` the byte. The stop comes after the instruction that did it, and the run report's watch_stop says the address, the old and new values and the instruction. |
 | `clear_watchpoint(id?)` | Remove a watchpoint by id, or all of MCP's. |
 | `list_watchpoints()` | Every watchpoint, with hit counts. |
 | `get_log(since?, max?)` | What logpoints have reported, after sequence number `since`. |
@@ -122,8 +145,8 @@ symbol from the program's debug info, or an expression (`table+2`). See
 
 | Tool | Does |
 |---|---|
-| `get_screen(scale?)` | A screenshot of the last complete frame, as a PNG, with frame_count so a new picture can be told from the same one twice. scale 2 doubles it for a closer look. To see the next frame, run_frames first. |
-| `get_screen_text(clear?)` | The text printed through the OS (OSWRCH) that has not been taken yet, laid out as on screen, in any mode. The run tools take it as they go, so this is what was printed since. Programs writing straight to screen memory don't show here: get_screen does. |
+| `get_screen(scale?, frames?, every?)` | A screenshot of the last complete frame, as a PNG, with its frame number so a new picture can be told from the same one twice. frames > 1 gives that many frames, `every` frames apart (default 1; 50 is a second), each an image tagged with its frame number and time: motion, flicker and animation as still pictures. Taking a sequence runs the machine and leaves it stopped at the last. scale 2 doubles each picture. |
+| `get_screen_text()` | What the screen says now, as rows of text, read from screen memory: MODE 7 exactly, other modes by matching each character cell against the font (inverse text too). A cell that is not a character -- a sprite, graphics, a user-defined character -- shows as ·. Right after a CLS or a scroll, and for programs that write the screen themselves. What was printed, in order, is the run tools' `output` instead. |
 
 ### The keyboard
 
@@ -151,9 +174,8 @@ symbol from the program's debug info, or an expression (`table+2`). See
 
 | Tool | Does |
 |---|---|
-| `read_sound_state()` | The SN76489 sound chip's registers: each tone channel's period (and frequency) and volume, the noise register, the latched register and the LFSR. |
-| `start_sound_capture()` | Log every byte written to the sound chip, with its cycle, until stop_sound_capture. Clears any earlier log. |
-| `stop_sound_capture(max_entries?)` | Stop logging sound chip writes and return them decoded (channel, tone or volume, value), the most recent max_entries (default 500). |
+| `get_sound_state()` | The SN76489 sound chip's registers: each tone channel's period (and frequency) and attenuation, the noise register, the latched register and the LFSR. |
+| `sound_capture(action, max_entries?)` | Log every byte written to the sound chip, with its cycle: action "start" (clearing any earlier log), then "stop" to have them back decoded (channel, tone or volume, value), the most recent max_entries (default 500). |
 
 ### Symbols
 
@@ -169,7 +191,7 @@ symbol from the program's debug info, or an expression (`table+2`). See
    `load_program(path="…/build/game.ssd", debug_info=[…labels, …lst], source="…/game.6502", stop_at="main")`.
 2. `save_state(label="title screen")`.
 3. `press_key(key="SPACE")`, `run_frames(count=50)`, `get_screen()`.
-4. `set_watchpoint(address="lives", access="write")`, `run(wait_ms=10000)`:
+4. `set_watchpoint(address="lives")`, `run()`:
    which instruction changes the lives counter? `disassemble()`, `step(mode="over")`.
 5. `restore_state(state_id=...)` and try again.
 
@@ -179,9 +201,9 @@ symbol from the program's debug info, or an expression (`table+2`). See
   Every other run tool runs as fast as it can and leaves the machine stopped.
 - Reading memory never touches I/O: `&FC00`-`&FEFF` reads as `&FF` rather
   than clearing a VIA's flags.
-- `output` and `get_screen_text` follow what was printed through OSWRCH,
-  laid out as the screen is; they do not see a program writing to screen
-  memory directly. `get_screen` always does.
+- `output` follows what was printed through OSWRCH, so a program writing
+  screen memory itself prints nothing there: `get_screen_text` and
+  `get_screen` see it.
 - `save_snapshot` writes jsbeeb's snapshot format to a file, with the disc
   contents in it; `save_state` keeps states in the server's memory, at most
   100, and they are gone when it stops.

@@ -75,6 +75,7 @@ export class DapSession {
         engine.on("output", this._onOutput);
         engine.on("debugInfo", this._onDebugInfo);
 
+        engine.debuggers++;
         socket.on("data", (d) => this._onData(d));
         socket.on("close", () => this._close());
         socket.on("error", () => this._close());
@@ -128,6 +129,7 @@ export class DapSession {
     }
 
     async _dispatch(req) {
+        if (Moving.has(req.command)) this.engine.driver = "dap";
         const handler = this[`on_${req.command}`];
         if (!handler) return this._respond(req, undefined, `Unsupported request: ${req.command}`);
         try {
@@ -142,6 +144,7 @@ export class DapSession {
     _close() {
         if (this.closed) return;
         this.closed = true;
+        this.engine.debuggers--;
         const e = this.engine;
         e.off("stopped", this._onStopped);
         e.off("continued", this._onContinued);
@@ -170,7 +173,9 @@ export class DapSession {
             description: stop.description,
             threadId: ThreadId,
             allThreadsStopped: true,
-            preserveFocusHint: false,
+            // A stop an MCP client caused is shown without taking the editor
+            // over: the person at it may be reading something else.
+            preserveFocusHint: stop.driver === "mcp",
         };
         if (stop.breakpointIds?.length) body.hitBreakpointIds = stop.breakpointIds;
         if (stop.reason === "data breakpoint" || stop.reason === "breakpoint") body.text = stop.description;
@@ -616,3 +621,5 @@ export class DapSession {
 }
 
 const NoResponse = Symbol("NoResponse");
+// The requests that set the machine moving: their stops are the debugger's own.
+const Moving = new Set(["launch", "attach", "restart", "continue", "next", "stepIn", "stepOut", "pause"]);

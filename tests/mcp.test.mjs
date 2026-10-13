@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startServer, mcp, tool, Hello } from "./helpers.mjs";
+import { startServer, mcp, tool, Hello, DapClient } from "./helpers.mjs";
 
 const helloDebug = {
     debug_info: [path.join(Hello, "build/hello.labels"), path.join(Hello, "build/hello.lst")],
@@ -203,4 +203,43 @@ test("MCP: get_screen with frames gives a sequence, each tagged with its frame",
         [0, 2, 4],
     );
     assert.deepEqual(tags.map((x) => x.ms), [0, 40, 80]);
+});
+
+test("MCP: typed results, logpoint formats, and courtesy to a debugger on the same machine", async (t) => {
+    const server = await startServer();
+    t.after(() => server.stop());
+    const { tools } = (await mcp(server, "tools/list")).result;
+    assert.equal(tools.find((x) => x.name === "run_frames").outputSchema.required[0], "registers");
+
+    // A result with a fixed shape comes as structuredContent as well as text.
+    const r = (await mcp(server, "tools/call", { name: "run_until_prompt", arguments: {} })).result;
+    assert.equal(r.structuredContent.completed, true);
+    assert.deepEqual(JSON.parse(r.content[0].text), r.structuredContent);
+
+    // Logpoint formats: decimal, character, word, hex.
+    await tool(server, "load_basic", { source: '10 A%=65:X%=7:CALL &900' });
+    await tool(server, "write_memory", { address: "&900", data: "60" }); // RTS
+    await tool(server, "set_breakpoint", { address: "&900", log_message: "A={A:d} chr={A:c} X={X} w={peekw(&900):w}" });
+    await tool(server, "type_text", { text: "RUN" });
+    await tool(server, "run_until_prompt");
+    const log = await tool(server, "get_log");
+    assert.equal(log.at(-1).text, "A=65 chr=A X=&07 w=&0060");
+
+    // With a debugger attached, an agent's stop does not take its editor over,
+    // and a tool that resets the machine says what it did.
+    const dap = new DapClient(server.dapPort);
+    await dap.connect();
+    t.after(() => dap.close());
+    await dap.request("initialize", { adapterID: "bbcmicro" });
+    const before = dap.events.length;
+    await tool(server, "step");
+    const stopped = await dap.waitFor("stopped", { since: before });
+    assert.equal(stopped.body.preserveFocusHint, true);
+    const reset = await tool(server, "reset", {});
+    assert.match(reset.warning, /VS Code is debugging/);
+    // ...and a stop the debugger asks for is its own.
+    let since = dap.events.length;
+    await dap.request("pause", { threadId: 1 });
+    const own = await dap.waitFor("stopped", { since });
+    assert.equal(own.body.preserveFocusHint, false);
 });

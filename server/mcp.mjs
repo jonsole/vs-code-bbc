@@ -60,6 +60,56 @@ const keyParams = {
     col: { type: "integer", minimum: 0, maximum: 15, description: "Keyboard matrix column, with row" },
     row: { type: "integer", minimum: 0, maximum: 15, description: "Keyboard matrix row, with col" },
 };
+// The shapes the results with a fixed one have, declared as each tool's
+// outputSchema so a client can take typed fields rather than parse text.
+const RegistersSchema = {
+    type: "object",
+    properties: {
+        pc: { type: "string" },
+        a: { type: "string" },
+        x: { type: "string" },
+        y: { type: "string" },
+        s: { type: "string" },
+        p: { type: "string" },
+        flags: { type: "string" },
+        instruction: { type: "string" },
+        frame_count: { type: "integer" },
+        elapsed_cycles: { type: "integer" },
+    },
+    required: ["pc", "a", "x", "y", "s", "p", "flags"],
+};
+const RunReportSchema = {
+    type: "object",
+    properties: {
+        completed: { type: "boolean", description: "Got where it was asked to go" },
+        stopped_reason: { type: "string", enum: ["breakpoint", "watchpoint", "paused", "timeout", "entry", "step"] },
+        stopped: { type: "string" },
+        breakpoint_ids: { type: "array", items: { type: "integer" } },
+        watch_stop: { type: "object" },
+        cycles_run: { type: "integer" },
+        frames_run: { type: "integer" },
+        registers: RegistersSchema,
+        output: { type: "string", description: "What was printed meanwhile" },
+        running: { type: "boolean" },
+        warning: { type: "string" },
+    },
+    required: ["registers"],
+};
+const StateSchema = {
+    type: "object",
+    properties: { state_id: { type: "string" }, model: { type: "string" }, label: { type: "string" }, registers: RegistersSchema, at: { type: "string" } },
+    required: ["state_id", "model"],
+};
+
+// Tools that set the machine moving: the stop that ends them is MCP's, which
+// a debugger shows without taking its editor over.
+const Moving = new Set([
+    "reset", "load_program", "run_basic", "run", "pause", "run_until_prompt", "run_frames", "run_for_cycles", "run_to", "step",
+    "type_text", "press_key", "restore_state", "load_snapshot", "get_screen",
+]);
+// Tools that reset or replace the machine: worth a warning when a person is debugging it.
+const Resetting = new Set(["reset", "load_program", "run_basic", "restore_state", "load_snapshot"]);
+
 const keySelector = (a) => ({ key: a.key, internal: a.internal, inkey: a.inkey, col: a.col, row: a.row });
 
 // Saved states stay here and only their ids cross the connection. About 0.4MB
@@ -612,7 +662,7 @@ export function makeTools(engine, serverInfo) {
                     engine.type(a.text, { enter: a.enter !== false });
                     const deadline = Date.now() + 30000;
                     while (engine.typing && engine.running && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
-                    return { typed: a.text, completed: !engine.typing, running: engine.running };
+                    return { typed: a.text, completed: !engine.typing, running: engine.running, registers: engine.registerReport() };
                 }
                 engine.type(a.text, { enter: a.enter !== false });
                 const result = await runAndReport("Typed", () => engine.runUntilTyped(), { clear: false });
@@ -786,6 +836,28 @@ export function makeTools(engine, serverInfo) {
             },
         },
     };
+
+    for (const name of ["run", "run_until_prompt", "run_frames", "run_for_cycles", "run_to", "step", "press_key", "type_text"]) {
+        tools[name].outputSchema = RunReportSchema;
+    }
+    for (const name of ["get_registers", "set_registers"]) tools[name].outputSchema = RegistersSchema;
+    tools.save_state.outputSchema = StateSchema;
+    tools.restore_state.outputSchema = StateSchema;
+
+    // Every call: whose stop it will be, and a word when it resets a machine someone is debugging.
+    for (const [name, tool] of Object.entries(tools)) {
+        const run = tool.run;
+        tool.run = async (a) => {
+            if (Moving.has(name)) engine.driver = "mcp";
+            const result = await run(a);
+            if (Resetting.has(name) && engine.debuggers > 0) {
+                const warning = "This reset the machine VS Code is debugging.";
+                if (Array.isArray(result?.content)) result.content.push({ type: "text", text: JSON.stringify({ warning }) });
+                else if (result && typeof result === "object" && !Array.isArray(result)) result.warning = warning;
+            }
+            return result;
+        };
+    }
     return tools;
 }
 
@@ -827,6 +899,7 @@ export async function handleMcp(tools, message, log = () => {}) {
                     name,
                     description: t.description,
                     inputSchema: t.inputSchema ?? { type: "object", properties: {} },
+                    ...(t.outputSchema && { outputSchema: t.outputSchema }),
                 })),
             });
         case "tools/call": {
@@ -835,7 +908,15 @@ export async function handleMcp(tools, message, log = () => {}) {
             try {
                 const result = await tool.run(params.arguments ?? {});
                 if (result && Array.isArray(result.content)) return reply(result);
-                return reply({ content: [{ type: "text", text: JSON.stringify(result ?? { ok: true }, null, 2) }] });
+                const body = result ?? { ok: true };
+                // A JSON object goes as structuredContent too (MCP 2025-06-18), and the
+                // same as text for clients that read only that. Lists are text alone:
+                // structured content must be an object.
+                const isObject = typeof body === "object" && !Array.isArray(body);
+                return reply({
+                    content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
+                    ...(isObject && { structuredContent: body }),
+                });
             } catch (e) {
                 log(`MCP ${params.name}: ${e.stack ?? e}`);
                 return reply({ content: [{ type: "text", text: `Error: ${e.message ?? e}` }], isError: true });

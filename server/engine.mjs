@@ -13,10 +13,11 @@
 // Stopping: jsbeeb's CPU calls a debug hook before each instruction while one
 // is installed, and a hook returning true stops the CPU before that
 // instruction runs. One hook here serves breakpoints, logpoints and stepping,
-// and is installed only while one of them needs it, so a machine with nothing
-// to watch for stays on jsbeeb's fast path. Watchpoints use the read and write
-// hooks the same way; a watchpoint stops the CPU after the instruction that
-// touched the memory.
+// and is installed only while one of them needs it. (jsbeeb's own hook that
+// watches OSWRCH for printed text is always there, so the CPU always takes
+// its checked path; the cost is a few percent, and printed text is worth it.)
+// Watchpoints use the read and write hooks the same way; a watchpoint stops
+// the CPU after the instruction that touched the memory.
 
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
@@ -102,6 +103,11 @@ export class Engine extends EventEmitter {
         this._lastFrameSeen = 0;
         this._log = [];
         this._logSeq = 0;
+        // Who set the machine moving last -- "mcp" or "dap" -- so a debugger
+        // can show a stop an agent caused without taking its editor over.
+        this.driver = "dap";
+        // DAP clients connected, so a tool that resets the machine can say so.
+        this.debuggers = 0;
     }
 
     async init() {
@@ -217,7 +223,7 @@ export class Engine extends EventEmitter {
     }
 
     _stopped(stop) {
-        this._lastStop = { ...stop, pc: this.cpu.pc };
+        this._lastStop = { ...stop, pc: this.cpu.pc, driver: this.driver };
         this.emit("stopped", this._lastStop);
     }
 
@@ -431,15 +437,35 @@ export class Engine extends EventEmitter {
         }
     }
 
-    _logpoint(bp, pc) {
-        const text = bp.logMessage.replace(/\{([^}]+)\}/g, (_, e) => {
+    /**
+     * A logpoint's message filled in: each {expression} as hex, or with a
+     * format after a colon as the Spectrum's logpoints have them --
+     * {A:d} decimal, {?ptr:c} a character, {peekw(x):w} a 16-bit word, {X:x} hex.
+     */
+    formatLogMessage(message) {
+        return message.replace(/\{([^}]+)\}/g, (_, inside) => {
+            const m = /^(.*?):([dcwx])$/.exec(inside.trim());
+            const [e, format] = m ? [m[1], m[2]] : [inside, "x"];
             try {
                 const v = this.evaluate(e);
-                return hex(v, v > 0xff ? 4 : 2);
+                switch (format) {
+                    case "d":
+                        return String(v);
+                    case "c":
+                        return v >= 32 && v < 127 ? String.fromCharCode(v) : `\\x${(v & 0xff).toString(16).padStart(2, "0")}`;
+                    case "w":
+                        return hex(v & 0xffff, 4);
+                    default:
+                        return hex(v, v > 0xff ? 4 : 2);
+                }
             } catch (err) {
                 return `<${err.message}>`;
             }
         });
+    }
+
+    _logpoint(bp, pc) {
+        const text = this.formatLogMessage(bp.logMessage);
         const entry = { seq: ++this._logSeq, pc, owner: bp.owner, text };
         this._log.push(entry);
         if (this._log.length > 2000) this._log.splice(0, this._log.length - 2000);
