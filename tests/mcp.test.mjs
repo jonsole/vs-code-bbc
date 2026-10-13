@@ -243,3 +243,42 @@ test("MCP: typed results, logpoint formats, and courtesy to a debugger on the sa
     const own = await dap.waitFor("stopped", { since });
     assert.equal(own.body.preserveFocusHint, false);
 });
+
+test("MCP: speed, breaking on interrupts, the tape recorder", async (t) => {
+    const server = await startServer();
+    t.after(() => server.stop());
+    await tool(server, "run_until_prompt");
+
+    // Each interrupt stops the run at its handler, saying where it came from.
+    await tool(server, "set_break_on_interrupt", { enabled: true });
+    const irq = await tool(server, "run", { timeout_secs: 1 });
+    assert.equal(irq.stopped_reason, "interrupt");
+    assert.match(irq.stopped, /^Interrupt: the handler at &[0-9A-F]{4}.*, from &[0-9A-F]{4}/);
+    await tool(server, "set_break_on_interrupt", { enabled: false });
+
+    // A tenth of real time: a tenth of a second of the machine's takes about a second.
+    assert.deepEqual(await tool(server, "set_speed", { multiplier: 0.1 }), { speed: "realtime", multiplier: 0.1 });
+    let start = Date.now();
+    assert.equal((await tool(server, "run", { timeout_secs: 0.1 })).stopped_reason, "timeout");
+    assert.ok(Date.now() - start > 700, `${Date.now() - start}ms`);
+    // Uncapped: five seconds of it in well under five.
+    await tool(server, "set_speed", { speed: "uncapped" });
+    start = Date.now();
+    await tool(server, "run", { timeout_secs: 5 });
+    assert.ok(Date.now() - start < 4000, `${Date.now() - start}ms`);
+    await tool(server, "set_speed", { speed: "realtime", multiplier: 1 });
+
+    // The recorder, with a tape that is nothing but carrier tone.
+    assert.equal((await tool(server, "tape_control")).tape, null);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bbc-tape-"));
+    const uef = path.join(dir, "tone.uef");
+    const chunk = Buffer.from([0x10, 0x01, 2, 0, 0, 0, 0xff, 0x7f]); // &0110: carrier tone, 32767 cycles
+    fs.writeFileSync(uef, Buffer.concat([Buffer.from("UEF File!\0", "latin1"), Buffer.from([10, 0]), chunk]));
+    await tool(server, "load_program", { path: uef, run: "*TAPE" });
+    let status = await tool(server, "tape_control");
+    assert.equal(status.tape, "tone.uef");
+    assert.equal(status.play_pressed, true);
+    status = await tool(server, "tape_control", { action: "stop" });
+    assert.equal(status.play_pressed, false);
+    assert.equal((await tool(server, "tape_control", { action: "eject" })).tape, null);
+});

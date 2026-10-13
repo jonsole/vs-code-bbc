@@ -106,6 +106,11 @@ export class Engine extends EventEmitter {
         // Who set the machine moving last -- "mcp" or "dap" -- so a debugger
         // can show a stop an agent caused without taking its editor over.
         this.driver = "dap";
+        // Real time scaled by this, unless warp: 0.1 a tenth of the speed, 2 double.
+        this.speedMultiplier = 1;
+        this._cycleDebt = 0;
+        // Stop at the first instruction of each interrupt handler.
+        this.breakOnInterrupt = false;
         // DAP clients connected, so a tool that resets the machine can say so.
         this.debuggers = 0;
     }
@@ -190,7 +195,15 @@ export class Engine extends EventEmitter {
         if (this.warp || this._step?.fast) {
             cycles = MaxSliceCycles * 4;
         } else {
-            cycles = Math.min(MaxSliceCycles, Math.max(1000, Math.round(((now - this._lastTick) / 1000) * cps)));
+            // Fractions carried over, so a crawl at a thousandth of the speed still moves.
+            this._cycleDebt += ((now - this._lastTick) / 1000) * cps * this.speedMultiplier;
+            cycles = Math.min(MaxSliceCycles, Math.floor(this._cycleDebt));
+            this._cycleDebt = Math.min(this._cycleDebt - cycles, MaxSliceCycles);
+            if (cycles < 1) {
+                this._lastTick = now;
+                this._schedule(SliceMs);
+                return;
+            }
         }
         this._lastTick = now;
         const stoppedEarly = !this.cpu.execute(cycles);
@@ -336,7 +349,7 @@ export class Engine extends EventEmitter {
 
     _updateHooks() {
         if (!this.cpu) return;
-        const wantInstr = this._bpByAddress.size > 0 || this._step !== null;
+        const wantInstr = this._bpByAddress.size > 0 || this._step !== null || this.breakOnInterrupt;
         const watches = [...this._watchpoints.values()];
         const wantRead = watches.some((w) => w.access !== "write");
         const wantWrite = watches.some((w) => w.access !== "read");
@@ -351,7 +364,19 @@ export class Engine extends EventEmitter {
         toggle("write", wantWrite, this.cpu.debugWrite, this._writeHook);
     }
 
+    setBreakOnInterrupt(on) {
+        this.breakOnInterrupt = !!on;
+        this._updateHooks();
+    }
+
     _onInstruction(pc, opcode) {
+        if (this.breakOnInterrupt && !this._step?.internal) {
+            const irq = this._irqEntry(this.cpu);
+            if (irq) {
+                this._pendingStop = { reason: "interrupt", description: `Interrupt: the handler at ${this.describeAddress(pc)}, from ${this.describeAddress(irq.ret)}` };
+                return true;
+            }
+        }
         const step = this._step;
         if (step) {
             const prev = step.prevOpcode;
@@ -1052,6 +1077,39 @@ export class Engine extends EventEmitter {
     async loadTape(file) {
         await this.session.loadTape(file);
         this.programPath = file;
+    }
+
+    /** The cassette recorder: "play", "stop", "rewind", "eject", or "status". */
+    tapeControl(action = "status") {
+        const t = this.cpu.tapeInterface;
+        switch (action) {
+            case "play":
+                t.pressPlay();
+                break;
+            case "stop":
+                t.pressStop?.();
+                break;
+            case "rewind":
+                if (t.rewindTape) t.rewindTape();
+                else t.tape?.rewind();
+                break;
+            case "eject":
+                t.pressStop?.();
+                t.setTape(null);
+                break;
+            case "status":
+                break;
+            default:
+                throw new Error('action is "play", "stop", "rewind", "eject" or "status"');
+        }
+        const tape = t.tape;
+        return {
+            tape: tape ? (tape.name ? path.basename(tape.name) : "inserted") : null,
+            position: tape && typeof tape.position === "number" ? Math.round(tape.position * 1000) / 1000 : undefined,
+            play_pressed: !!t.playPressed,
+            motor_on: !!t.motorOn,
+            moving: !!t.tapeRunning,
+        };
     }
 
     async loadBasic(source) {

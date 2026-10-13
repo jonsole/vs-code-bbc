@@ -82,7 +82,7 @@ const RunReportSchema = {
     type: "object",
     properties: {
         completed: { type: "boolean", description: "Got where it was asked to go" },
-        stopped_reason: { type: "string", enum: ["breakpoint", "watchpoint", "paused", "timeout", "entry", "step"] },
+        stopped_reason: { type: "string", enum: ["breakpoint", "watchpoint", "interrupt", "paused", "timeout", "entry", "step"] },
         stopped: { type: "string" },
         breakpoint_ids: { type: "array", items: { type: "integer" } },
         watch_stop: { type: "object" },
@@ -409,6 +409,44 @@ export function makeTools(engine, serverInfo) {
                 }
                 return runResult(stop.reason === "step" && !stop.timedOut ? null : stop, { startCycles, clear: false });
             },
+        },
+
+        set_speed: {
+            description:
+                'How fast the machine runs while it runs on its own (run, the screen panel): "realtime" (a real 2MHz BBC) or "uncapped" (as fast as ' +
+                "the host goes), and a multiplier on real time -- 0.1 a tenth, 0.001 slow enough to watch single writes land, 2 double. The tools " +
+                "that run to somewhere (run_frames, run_until_prompt, step...) always run flat out.",
+            inputSchema: {
+                type: "object",
+                properties: { speed: { type: "string", enum: ["realtime", "uncapped"] }, multiplier: { type: "number", minimum: 0.001, maximum: 20 } },
+            },
+            run: (a) => {
+                if (a.multiplier !== undefined) {
+                    if (!(a.multiplier >= 0.001 && a.multiplier <= 20)) throw new Error("multiplier is 0.001 to 20");
+                    engine.speedMultiplier = a.multiplier;
+                    engine.warp = false;
+                }
+                if (a.speed !== undefined) engine.warp = a.speed === "uncapped";
+                return { speed: engine.warp ? "uncapped" : "realtime", multiplier: engine.speedMultiplier };
+            },
+        },
+        set_break_on_interrupt: {
+            description:
+                "Stop a run at the first instruction of the interrupt handler each time the CPU takes an interrupt (IRQ or NMI): for seeing what " +
+                "a handler does, or what it interrupted. The stop's reason is interrupt, and it says where the interrupt came from.",
+            inputSchema: { type: "object", properties: { enabled: { type: "boolean" } }, required: ["enabled"] },
+            run: (a) => {
+                engine.setBreakOnInterrupt(a.enabled);
+                return { break_on_interrupt: engine.breakOnInterrupt };
+            },
+        },
+        tape_control: {
+            description:
+                'The cassette recorder, for a tape load_program put in: "play", "stop", "rewind", "eject", or "status" (the default). ' +
+                "Every reply says what is in it, how far through (0 to 1), and whether PLAY is down, the motor relay on and the tape moving -- " +
+                "the tape moves only while both are. Takes effect at once, mid-run included.",
+            inputSchema: { type: "object", properties: { action: { type: "string", enum: ["play", "stop", "rewind", "eject", "status"] } } },
+            run: (a) => engine.tapeControl(a.action ?? "status"),
         },
 
         // --- breakpoints ---------------------------------------------------
