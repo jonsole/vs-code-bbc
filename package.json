@@ -1,0 +1,352 @@
+{
+  "name": "bbc-micro-debug",
+  "displayName": "BBC Micro Debug",
+  "description": "Debug BBC Micro programs in VS Code on jsbeeb, an accurate open source BBC Micro emulator: breakpoints, watchpoints, logpoints, stepping, disassembly, memory, source-level BeebAsm and ca65, a live screen with keyboard, and an MCP server so AI agents can drive the same machine.",
+  "version": "0.1.0",
+  "publisher": "jonsole",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jonsole/vs-code-bbc"
+  },
+  "engines": {
+    "vscode": "^1.101.0"
+  },
+  "categories": [
+    "Debuggers",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "BBC Micro",
+    "6502",
+    "BeebAsm",
+    "Acorn",
+    "MCP"
+  ],
+  "main": "./extension/extension.js",
+  "activationEvents": [
+    "onDebugResolve:bbcmicro",
+    "onDebugDynamicConfigurations:bbcmicro",
+    "onLanguage:beebasm",
+    "onStartupFinished"
+  ],
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\"",
+    "server": "node server/main.mjs"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "beebasm",
+        "aliases": [
+          "BeebAsm",
+          "beebasm"
+        ],
+        "extensions": [
+          ".6502",
+          ".beebasm"
+        ],
+        "configuration": "./extension/language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "beebasm",
+        "scopeName": "source.beebasm",
+        "path": "./extension/beebasm.tmLanguage.json"
+      }
+    ],
+    "breakpoints": [
+      { "language": "beebasm" },
+      { "language": "6502" },
+      { "language": "asm6502" },
+      { "language": "ca65" },
+      { "language": "asm" },
+      { "language": "bbcbasic" }
+    ],
+    "debuggers": [
+      {
+        "type": "bbcmicro",
+        "label": "BBC Micro",
+        "languages": [
+          "beebasm",
+          "ca65",
+          "6502"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "What to run: a disc (.ssd/.dsd, booted with SHIFT-BREAK), a tape (.uef, CHAINed), BBC BASIC source (.bas, RUN) or a raw binary (give loadAddress)."
+              },
+              "model": {
+                "type": "string",
+                "description": "The machine.",
+                "default": "B-DFS1.2",
+                "enum": [
+                  "B-DFS1.2",
+                  "B-DFS0.9",
+                  "B1770",
+                  "B1770A",
+                  "Master",
+                  "MasterADFS",
+                  "MasterANFS"
+                ],
+                "enumDescriptions": [
+                  "BBC Model B, 8271 disc controller, Acorn DFS 1.2",
+                  "BBC Model B, 8271, DFS 0.9",
+                  "BBC Model B, 1770 disc controller, DFS",
+                  "BBC Model B, 1770, ADFS",
+                  "BBC Master 128, DFS",
+                  "BBC Master 128, ADFS",
+                  "BBC Master 128, ANFS"
+                ]
+              },
+              "loadAddress": {
+                "type": "string",
+                "description": "Raw binaries: where to load it, e.g. \"&1900\"."
+              },
+              "execAddress": {
+                "type": "string",
+                "description": "Raw binaries: where to enter it (default loadAddress). It is CALLed from BASIC."
+              },
+              "run": {
+                "type": "string",
+                "description": "What to type to start the program, instead of the default (SHIFT-BREAK for a disc, CHAIN\"\" for a tape, RUN for BASIC, CALL for a binary). Use \\r between lines."
+              },
+              "debugInfo": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Symbols and source lines: BeebAsm's -labels file and -v listing, a ca65/ld65 .dbg file, or a VICE label file.",
+                "default": []
+              },
+              "source": {
+                "type": "string",
+                "description": "The main source file, when debugInfo has a BeebAsm listing: its lines are matched to the listing."
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Stop as soon as the program starts (a raw binary: at execAddress).",
+                "default": false
+              },
+              "stopAt": {
+                "type": "string",
+                "description": "Stop on arrival at this address or symbol, e.g. \"main\"."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Relative paths are from here.",
+                "default": "${workspaceFolder}"
+              },
+              "preLaunchTask": {
+                "type": "string"
+              }
+            }
+          },
+          "attach": {
+            "properties": {
+              "debugInfo": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Symbols and source lines to add."
+              },
+              "source": {
+                "type": "string"
+              },
+              "stopOnAttach": {
+                "type": "boolean",
+                "default": true
+              },
+              "cwd": {
+                "type": "string",
+                "default": "${workspaceFolder}"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "bbcmicro",
+            "request": "launch",
+            "name": "BBC Micro: run disc",
+            "program": "${workspaceFolder}/build/main.ssd",
+            "debugInfo": [
+              "${workspaceFolder}/build/main.labels",
+              "${workspaceFolder}/build/main.lst"
+            ],
+            "source": "${workspaceFolder}/main.6502"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "BBC Micro: Launch a BeebAsm disc",
+            "description": "Boot a disc built by BeebAsm, with source-level debugging",
+            "body": {
+              "type": "bbcmicro",
+              "request": "launch",
+              "name": "BBC Micro: ${1:main}",
+              "preLaunchTask": "${2:beebasm}",
+              "program": "^\"\\${workspaceFolder}/build/${1:main}.ssd\"",
+              "debugInfo": [
+                "^\"\\${workspaceFolder}/build/${1:main}.labels\"",
+                "^\"\\${workspaceFolder}/build/${1:main}.lst\""
+              ],
+              "source": "^\"\\${workspaceFolder}/${1:main}.6502\""
+            }
+          },
+          {
+            "label": "BBC Micro: Launch a raw binary",
+            "description": "Load a binary at an address and CALL it",
+            "body": {
+              "type": "bbcmicro",
+              "request": "launch",
+              "name": "BBC Micro: ${1:binary}",
+              "program": "^\"\\${workspaceFolder}/${1:code.bin}\"",
+              "loadAddress": "${2:&1900}",
+              "stopOnEntry": true
+            }
+          },
+          {
+            "label": "BBC Micro: Run BASIC",
+            "body": {
+              "type": "bbcmicro",
+              "request": "launch",
+              "name": "BBC Micro: BASIC",
+              "program": "^\"\\${file}\""
+            }
+          },
+          {
+            "label": "BBC Micro: Attach to the running machine",
+            "body": {
+              "type": "bbcmicro",
+              "request": "attach",
+              "name": "BBC Micro: attach"
+            }
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "bbcMicro.showScreen",
+        "title": "Show Screen",
+        "category": "BBC Micro",
+        "icon": "$(device-desktop)"
+      },
+      {
+        "command": "bbcMicro.runFile",
+        "title": "Run on the BBC Micro",
+        "category": "BBC Micro",
+        "icon": "$(play)"
+      },
+      {
+        "command": "bbcMicro.debugFile",
+        "title": "Debug on the BBC Micro",
+        "category": "BBC Micro",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "bbcMicro.typeText",
+        "title": "Type Text at the Keyboard…",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.serverStart",
+        "title": "Start the Emulator",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.serverStop",
+        "title": "Stop the Emulator",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.serverRestart",
+        "title": "Restart the Emulator",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.serverLog",
+        "title": "Show the Emulator's Log",
+        "category": "BBC Micro"
+      },
+      {
+        "command": "bbcMicro.copyMcpSetup",
+        "title": "Copy MCP Setup for Claude Code…",
+        "category": "BBC Micro"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "bbcMicro.runFile",
+          "when": "resourceExtname =~ /^\\.(ssd|dsd|uef|bas)$/i",
+          "group": "navigation@90"
+        },
+        {
+          "command": "bbcMicro.debugFile",
+          "when": "resourceExtname =~ /^\\.(ssd|dsd|uef|bas)$/i",
+          "group": "navigation@91"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "bbcMicro.showScreen",
+          "when": "debugType == bbcmicro",
+          "group": "navigation"
+        }
+      ]
+    },
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "bbcMicro.mcp",
+        "label": "BBC Micro emulator"
+      }
+    ],
+    "configuration": {
+      "title": "BBC Micro",
+      "properties": {
+        "bbcMicro.dapPort": {
+          "type": "number",
+          "default": 4811,
+          "description": "The port the emulator serves the Debug Adapter Protocol on."
+        },
+        "bbcMicro.httpPort": {
+          "type": "number",
+          "default": 8811,
+          "description": "The port the emulator serves MCP (/mcp) and the screen on."
+        },
+        "bbcMicro.model": {
+          "type": "string",
+          "default": "B-DFS1.2",
+          "description": "The model the emulator starts as (a launch configuration's model overrides it)."
+        },
+        "bbcMicro.nodePath": {
+          "type": "string",
+          "default": "",
+          "description": "Run the emulator with this Node.js (22 or later) instead of VS Code's own."
+        },
+        "bbcMicro.showScreenOnDebug": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open the screen panel when a BBC Micro debug session starts."
+        },
+        "bbcMicro.screenScale": {
+          "type": "string",
+          "enum": [
+            "fit",
+            "1",
+            "2"
+          ],
+          "default": "fit",
+          "description": "How the screen panel scales the picture."
+        }
+      }
+    }
+  }
+}

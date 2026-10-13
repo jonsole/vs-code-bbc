@@ -1,0 +1,397 @@
+// Some info:
+// http://www.playvectrex.com/designit/lecture/UP12.HTM
+// https://books.google.com/books?id=wUecAQAAQBAJ&pg=PA431&lpg=PA431&dq=acia+tdre&source=bl&ots=mp-yF-mK-P&sig=e6aXkFRfiIOb57WZmrvdIGsCooI&hl=en&sa=X&ei=0g2fVdDyFIXT-QG8-JD4BA&ved=0CCwQ6AEwAw#v=onepage&q=acia%20tdre&f=false
+// http://www.classiccmp.org/dunfield/r/6850.pdf
+
+export class Acia extends EventTarget {
+    constructor(cpu, toneGen, scheduler, relayNoise) {
+        super();
+        this.cpu = cpu;
+        this.toneGen = toneGen;
+        this.rs423Handler = null;
+        this.relayNoise = relayNoise;
+
+        this.sr = 0x00;
+        this.cr = 0x00;
+        this.dr = 0x00;
+
+        this.rs423Selected = false;
+        this.motorOn = false;
+        this.playPressed = true;
+        this.tapeCarrierCount = 0;
+        this.tapeDcdLineLevel = false;
+        this.hadDcdHigh = false;
+        this.saidOverrun = false;
+        this.serialReceiveRate = 0;
+        this.serialReceiveCyclesPerByte = 0;
+        this.serialTransmitRate = 0;
+        this.serialTransmitCyclesPerByte = 0;
+
+        this.setSerialReceive(19200);
+        this.setSerialTransmit(19200);
+        this.txCompleteTask = scheduler.newTask(() => {
+            this.sr |= 0x02; // set the TDRE
+            this.updateIrq();
+        });
+        this.runTapeTask = scheduler.newTask(() => this.runTape());
+        this.runRs423Task = scheduler.newTask(() => this.runRs423());
+    }
+
+    // MC6850: the transmit interrupt is selected by CR6:CR5 = 01 and follows
+    // TDRE, which a high CTS inhibits.
+    txIrq() {
+        return (this.cr & 0x60) === 0x20 && (this.sr & 0x0a) === 0x02;
+    }
+
+    updateIrq() {
+        if (this.sr & this.cr & 0x80 || this.txIrq()) {
+            this.cpu.interrupt |= 0x04;
+        } else {
+            this.cpu.interrupt &= ~0x04;
+        }
+    }
+
+    reset() {
+        // TODO(#1064) testing on a real beeb seems to suggest that reset also
+        // clears CR bits (i.e. things stop working until CR is rewritten
+        // with sane value). This disagrees with the datasheet.
+        // CTS and DTD are based on external inputs so leave them alone.
+        this.sr &= 0x08 | 0x04;
+        // Reset clears the transmit register so raise the empty bit.
+        this.sr |= 0x02;
+        this.hadDcdHigh = false;
+        this.updateIrq();
+    }
+
+    tone(freq) {
+        if (!freq) this.toneGen.mute();
+        else this.toneGen.tone(freq);
+    }
+
+    setMotor(on) {
+        if (on && !this.motorOn) {
+            this.runTape();
+            this.relayNoise.motorOn();
+        } else if (!on && this.motorOn) {
+            this.stopRunning();
+            this.relayNoise.motorOff();
+        }
+        this.motorOn = on;
+    }
+
+    /** Whether the machine and the recorder between them ask for the tape to move. */
+    get shouldRun() {
+        return this.motorOn && this.playPressed;
+    }
+
+    /** Whether the tape is moving: asked to, and not run out. */
+    get tapeRunning() {
+        return this.shouldRun && this.runTapeTask.scheduled();
+    }
+
+    /** PLAY on the recorder: down by default, so the relay alone runs the tape as it always has. */
+    pressPlay() {
+        if (this.playPressed) return;
+        this.playPressed = true;
+        if (this.motorOn) this.runTape();
+    }
+
+    /** STOP on the recorder: the tape stays put however the relay is set, until PLAY is pressed again. */
+    pressStop() {
+        if (!this.playPressed) return;
+        this.playPressed = false;
+        if (this.motorOn) this.stopRunning();
+    }
+
+    stopRunning() {
+        this.toneGen.mute();
+        this.runTapeTask.cancel();
+        this.setTapeCarrier(false);
+    }
+
+    read(addr) {
+        if (addr & 1) {
+            this.sr &= ~0xa1;
+            this.hadDcdHigh = false;
+            this.updateIrq();
+            return this.dr;
+        } else {
+            let result = (this.sr & 0x7f) | (this.sr & this.cr & 0x80);
+            if (this.txIrq()) result |= 0x80;
+            // MC6850: "A low CTS indicates that there is a Clear-to-Send
+            // from the modem. In the high state, the Transmit Data Register
+            // Empty bit is inhibited".
+            if (result & 0x08) {
+                result &= ~0x02;
+            }
+
+            // MC6850: "It remains high after the DCD input is returned low
+            // until cleared by first reading the Status Register and then
+            // the Data Register".
+            // Testing on a real machine shows that only the Data Register
+            // read matters, and clears the "saw DCD high" condition.
+            if (this.hadDcdHigh) {
+                result |= 0x04;
+            }
+
+            return result;
+        }
+    }
+
+    write(addr, val) {
+        if (addr & 1) {
+            this.sr &= ~0x02;
+            this.txCompleteTask.reschedule(this.serialTransmitCyclesPerByte);
+            this.updateIrq();
+            if (this.rs423Selected && this.rs423Handler) this.rs423Handler.onTransmit(val);
+        } else {
+            if ((val & 0x03) === 0x03) {
+                // According to the 6850 docs writing 3 here doesn't affect any CR bits, but
+                // just resets the device.
+                this.reset();
+            } else {
+                this.cr = val;
+                this.setSerialReceive(this.serialReceiveRate);
+                this.setSerialTransmit(this.serialTransmitRate);
+                this.updateIrq();
+            }
+        }
+    }
+
+    selectRs423(selected) {
+        this.rs423Selected = !!selected;
+        if (this.rs423Selected) {
+            // When a handler is present it acts as the remote device and is
+            // always ready to receive, so CTS is low (active = clear to send).
+            // Without a handler there is nothing on the other end and CTS
+            // stays high, which inhibits TDRE so the OS output buffer drains
+            // silently rather than hanging.
+            if (this.rs423Handler) {
+                this.sr &= ~0x08; // CTS low — clear to send
+            } else {
+                this.sr |= 0x08; // CTS high — not connected
+            }
+        } else {
+            // Cassette selected — CTS is always low (clear to send).
+            this.sr &= ~0x08;
+        }
+        this.dcdLineUpdated();
+        this.runRs423Task.ensureScheduled(this.rs423Selected, this.serialReceiveCyclesPerByte);
+    }
+
+    /**
+     * Attach or detach an RS-423 peripheral handler at runtime.
+     * The handler must implement onTransmit(byte) and tryReceive(rts).
+     * If RS-423 is already selected, the CTS line is updated immediately.
+     */
+    setRs423Handler(handler) {
+        this.rs423Handler = handler;
+        if (this.rs423Selected) this.selectRs423(true);
+    }
+
+    dcdLineUpdated() {
+        // AUG: "It will always be low when the RS423 interface is selected".
+        const level = this.rs423Selected ? false : this.tapeDcdLineLevel;
+
+        if (level && !(this.sr & 0x04)) {
+            // DCD interrupts on low -> high level change.
+            this.sr |= 0x84;
+            this.hadDcdHigh = true;
+        } else if (!level && this.sr & 0x04) {
+            this.sr &= ~0x04;
+        }
+        this.updateIrq();
+    }
+
+    setTapeCarrier(level) {
+        if (!level) {
+            this.tapeCarrierCount = 0;
+            this.tapeDcdLineLevel = false;
+        } else {
+            this.tapeCarrierCount++;
+            // The tape hardware doesn't raise DCD until the carrier tone
+            // has persisted for a while. The BBC service manual opines,
+            // "The DCD flag in the 6850 should change 0.1 to 0.4 seconds
+            // after a continuous tone appears".
+            // Star Drifter doesn't load without this.
+            // We use 0.174s, measured on an issue 3 model B.
+            // Testing on real hardware, DCD is blipped, it lowers about
+            // 210us after it raises, even though the carrier tone
+            // may be continuing.
+            this.tapeDcdLineLevel = this.tapeCarrierCount === 209;
+        }
+        this.dcdLineUpdated();
+    }
+
+    receive(byte) {
+        byte |= 0;
+        if (this.sr & 0x01) {
+            // Overrun.
+            // TODO(#1064) this doesn't match the datasheet:
+            // "The Overrun does not occur in the Status Register until the
+            // valid character prior to Overrun has been read."
+            this.sr |= 0xa0;
+            this.noteOverrun();
+        } else {
+            // If bit 7 contains parity, mask it off.
+            this.dr = byte & (this.cr & 0x10 ? 0xff : 0x7f);
+            this.sr |= 0x81;
+        }
+        this.updateIrq();
+    }
+
+    noteOverrun() {
+        if (this.saidOverrun) return;
+        this.saidOverrun = true;
+        this.dispatchEvent(
+            new CustomEvent("notice", {
+                detail: {
+                    message:
+                        "A serial byte arrived before the previous one was read, so it was lost. " +
+                        "A tape load that stops with Data? is usually this.",
+                    title: "Serial",
+                    quietKey: "quietSerialOverrun",
+                },
+            }),
+        );
+    }
+
+    snapshotState() {
+        const scheduler = this.txCompleteTask.scheduler;
+        return {
+            sr: this.sr,
+            cr: this.cr,
+            dr: this.dr,
+            rs423Selected: this.rs423Selected,
+            motorOn: this.motorOn,
+            playPressed: this.playPressed,
+            tapeCarrierCount: this.tapeCarrierCount,
+            tapeDcdLineLevel: this.tapeDcdLineLevel,
+            hadDcdHigh: this.hadDcdHigh,
+            serialReceiveRate: this.serialReceiveRate,
+            serialTransmitRate: this.serialTransmitRate,
+            txCompleteTaskOffset: this.txCompleteTask.scheduled()
+                ? this.txCompleteTask.expireEpoch - scheduler.epoch
+                : null,
+            runTapeTaskOffset: this.runTapeTask.scheduled() ? this.runTapeTask.expireEpoch - scheduler.epoch : null,
+            runRs423TaskOffset: this.runRs423Task.scheduled() ? this.runRs423Task.expireEpoch - scheduler.epoch : null,
+        };
+    }
+
+    restoreState(state) {
+        this.sr = state.sr;
+        this.cr = state.cr;
+        this.dr = state.dr;
+        this.rs423Selected = state.rs423Selected;
+        this.motorOn = state.motorOn;
+        // Snapshots predating the recorder's PLAY latch were taken with it down.
+        this.playPressed = state.playPressed ?? true;
+        this.tapeCarrierCount = state.tapeCarrierCount;
+        this.tapeDcdLineLevel = state.tapeDcdLineLevel;
+        this.hadDcdHigh = state.hadDcdHigh;
+        // The byte times are derived from the rates and the restored word format, not saved.
+        this.setSerialReceive(state.serialReceiveRate);
+        // Snapshots predating transmit timing have no saved rate.
+        this.setSerialTransmit(state.serialTransmitRate ?? 19200);
+        this.updateIrq();
+
+        this.txCompleteTask.cancel();
+        this.runTapeTask.cancel();
+        this.runRs423Task.cancel();
+        if (state.txCompleteTaskOffset !== null) this.txCompleteTask.schedule(state.txCompleteTaskOffset);
+        if (state.runTapeTaskOffset !== null) this.runTapeTask.schedule(state.runTapeTaskOffset);
+        if (state.runRs423TaskOffset !== null) this.runRs423Task.schedule(state.runRs423TaskOffset);
+    }
+
+    /** A tape put in, or taken out, while the tape is meant to be running starts or stops at once. */
+    setTape(tape) {
+        this.tape = tape;
+        if (!this.shouldRun) return;
+        if (tape) this.runTape();
+        else this.stopRunning();
+    }
+
+    rewindTape() {
+        if (!this.tape) return;
+        console.log("rewinding tape");
+        this.tape.rewind();
+        // A tape that had run out stopped being polled; rewound, it has something to play again.
+        if (this.shouldRun) this.runTape();
+    }
+
+    // Byte times are held in CPU cycles because that's what the scheduler counts.
+    secondsToCycles(sec) {
+        return Math.floor(this.cpu.model.cyclesPerSecond * sec) | 0;
+    }
+
+    numBitsPerByte() {
+        const wordLength = this.cr & 0x10 ? 8 : 7;
+        let stopBits, parityBits;
+        switch ((this.cr >>> 2) & 7) {
+            case 0:
+                stopBits = 2;
+                parityBits = 1;
+                break;
+            case 1:
+                stopBits = 2;
+                parityBits = 1;
+                break;
+            case 2:
+                stopBits = 1;
+                parityBits = 1;
+                break;
+            case 3:
+                stopBits = 1;
+                parityBits = 1;
+                break;
+            case 4:
+                stopBits = 2;
+                parityBits = 0;
+                break;
+            case 5:
+                stopBits = 1;
+                parityBits = 0;
+                break;
+            case 6:
+                stopBits = 1;
+                parityBits = 1;
+                break;
+            case 7:
+                stopBits = 1;
+                parityBits = 1;
+                break;
+        }
+        const startBits = 1;
+        return startBits + wordLength + stopBits + parityBits;
+    }
+
+    rts() {
+        // True iff CR6 = 0 or CR5 and CR6 are both 1.
+        return (this.cr & 0x40) === 0 || (this.cr & 0x60) === 0x60;
+    }
+
+    setSerialReceive(rate) {
+        this.serialReceiveRate = rate;
+        this.serialReceiveCyclesPerByte = this.secondsToCycles(this.numBitsPerByte() / rate);
+    }
+
+    setSerialTransmit(rate) {
+        this.serialTransmitRate = rate;
+        this.serialTransmitCyclesPerByte = this.secondsToCycles(this.numBitsPerByte() / rate);
+    }
+
+    /** Polls the tape and books the next poll; a tape that has run out is left alone. */
+    runTape() {
+        if (!this.tape || !this.playPressed) return;
+        const delay = this.tape.poll(this);
+        if (delay === undefined) this.stopRunning();
+        else this.runTapeTask.reschedule(delay);
+    }
+
+    runRs423() {
+        if (!this.rs423Handler) return;
+        const rcv = this.rs423Handler.tryReceive(this.rts());
+        if (rcv >= 0) this.receive(rcv);
+        this.runRs423Task.reschedule(this.serialReceiveCyclesPerByte);
+    }
+}

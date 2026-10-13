@@ -1,0 +1,246 @@
+// CMOS layout: bytes 0-13 are RTC internal registers; bytes 14-63 are the 50
+// bytes of user storage.  Storage byte 11 (= CMOS address 25 = 0x19) holds
+// the BBC Master DFS configuration byte whose bits [1:0] are the WD1770 step
+// rate (*CONFIGURE FDRIVE):  0=6ms  1=12ms  2=20ms  3=30ms.
+// The correct default is FDRIVE 0 (6ms, value 0xc8).  The previous default
+// 0xca had bits[1:0]=0b10 (20ms), which caused disc-streaming demos such as
+// STNICC-beeb to hang on the Master 128 because the WD1770 seek overran the
+// vsync window.  Confirmed by @tom-seddon (b2 emulator):
+// https://github.com/mattgodbolt/jsbeeb/issues/576
+const defaultCmos = Object.freeze([
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfe, 0x00, 0xeb, 0x00,
+    0xc9, 0xff, 0xff, 0x12, 0x00, 0x17, 0xc8, 0x1e, 0x05, 0x00, 0x35, 0xa6, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+]);
+
+function toBcd(value) {
+    return parseInt(value.toString(10), 16);
+}
+
+function fromBcd(value) {
+    return parseInt(value.toString(16), 10);
+}
+
+export { defaultCmos };
+
+// A shared session (src/lockstep.js) runs the same machine on several computers in step, one of them hosting.
+// The session clock holds the host's local time as if it were UTC and is read and set through this view, so
+// every computer shows the host's time, whatever its own time zone.
+function utcView(date) {
+    return {
+        getSeconds: () => date.getUTCSeconds(),
+        getMinutes: () => date.getUTCMinutes(),
+        getHours: () => date.getUTCHours(),
+        getDay: () => date.getUTCDay(),
+        getDate: () => date.getUTCDate(),
+        getMonth: () => date.getUTCMonth(),
+        getFullYear: () => date.getUTCFullYear(),
+        setSeconds: (value) => date.setUTCSeconds(value),
+        setMinutes: (value) => date.setUTCMinutes(value),
+        setHours: (value) => date.setUTCHours(value),
+        setDate: (value) => date.setUTCDate(value),
+        setMonth: (value) => date.setUTCMonth(value),
+        setFullYear: (value) => date.setUTCFullYear(value),
+        getTime: () => date.getTime(),
+    };
+}
+
+/**
+ * CMOS persistence backed by a browser storage object, which can be unavailable, full or holding
+ * something other than what was last saved.
+ *
+ * @param {function(): Storage} getStorage typically `() => window.localStorage`. Reading that
+ *   property is itself what throws when a page is refused storage, so it happens per call, inside
+ *   the try.
+ * @param {function(*)} onSaveFailure called with the error the first time a save fails
+ */
+export function localStoragePersistence(getStorage, onSaveFailure) {
+    let saveFailureReported = false;
+    return {
+        load() {
+            try {
+                const stored = getStorage().cmosRam;
+                if (!stored) return null;
+                const parsed = JSON.parse(stored);
+                if (!Array.isArray(parsed) || parsed.length !== defaultCmos.length)
+                    throw new Error(`the stored settings are not ${defaultCmos.length} bytes`);
+                return parsed;
+            } catch (error) {
+                console.log(`Unable to read the stored CMOS settings: ${error?.message ?? error}`);
+                return null;
+            }
+        },
+        save(data) {
+            try {
+                getStorage().cmosRam = JSON.stringify(data);
+            } catch (error) {
+                console.log(`Unable to store the CMOS settings: ${error?.message ?? error}`);
+                if (saveFailureReported) return;
+                saveFailureReported = true;
+                onSaveFailure(error);
+            }
+        },
+    };
+}
+
+export class Cmos {
+    constructor(persistence, cmosOverride, econet) {
+        this.store = persistence ? persistence.load() : null;
+        this.persistence = persistence;
+        this.enabled = false;
+        this.isRead = false;
+        this.addressSelect = false;
+        this.dataSelect = false;
+        this.cmosAddr = 0;
+        this.now = () => Date.now();
+        this.utc = false;
+        this.timeOffset = 0;
+        this.beforeSession = null;
+
+        if (!this.store) {
+            this.store = [...defaultCmos];
+        }
+        if (cmosOverride) {
+            this.store = cmosOverride(this.store);
+        }
+        if (econet) {
+            this.store[0xe] = econet.stationId;
+            if (this.store[0xf] === 0) {
+                // Catch an invalid FS configuration setting (possibly as a result of using a prior version that didn't set a default of 254 in CMOS)
+                this.store[0xf] = 254;
+            }
+        }
+        this.save();
+    }
+
+    save() {
+        if (this.persistence) {
+            this.persistence.save(this.store);
+        }
+    }
+
+    /**
+     * The chip as a machine joining a shared session needs it: the settings, the offset a program set
+     * the clock to, and how far through an access the bus is.
+     */
+    sessionState() {
+        const { store, timeOffset, enabled, isRead, addressSelect, dataSelect, cmosAddr } = this;
+        return { store: [...store], timeOffset, enabled, isRead, addressSelect, dataSelect, cmosAddr };
+    }
+
+    /**
+     * Joins a shared session: the host's `sessionState()` replaces this machine's for the session's
+     * duration and is never stored over it, and the clock reads `now`, the session's wall time in
+     * milliseconds.
+     */
+    joinSession(state, now) {
+        if (!this.beforeSession) {
+            const { persistence, store, utc, timeOffset } = this;
+            this.beforeSession = { persistence, store, now: this.now, utc, timeOffset };
+        }
+        const { store, timeOffset, enabled, isRead, addressSelect, dataSelect, cmosAddr } = state;
+        Object.assign(this, { timeOffset, enabled, isRead, addressSelect, dataSelect, cmosAddr });
+        this.store = [...store];
+        this.persistence = null;
+        this.now = now;
+        this.utc = true;
+    }
+
+    /** Back to this machine's own settings and clock, as they were before the session. */
+    leaveSession() {
+        if (!this.beforeSession) return;
+        Object.assign(this, this.beforeSession);
+        this.beforeSession = null;
+    }
+
+    bbcDateTime() {
+        const result = new Date(this.now() + this.timeOffset);
+        result.setMilliseconds(0);
+        return this.utc ? utcView(result) : result;
+    }
+
+    read() {
+        if (!this.enabled) return 0xff;
+        // To drive the bus we need:
+        // - CMOS enabled.
+        // - Address Select low.
+        // - Data Select high.
+        // - Read high.
+
+        if (!this.addressSelect && this.dataSelect && this.isRead) {
+            // The first 10 bytes of CMOS RAM store the RTC clock
+            if (this.cmosAddr < 10) {
+                const current = this.bbcDateTime();
+                switch (this.cmosAddr) {
+                    case 0:
+                        return toBcd(current.getSeconds());
+                    case 2:
+                        return toBcd(current.getMinutes());
+                    case 4:
+                        return toBcd(current.getHours());
+                    case 6:
+                        return toBcd(current.getDay() + 1);
+                    case 7:
+                        return toBcd(current.getDate());
+                    case 8:
+                        return toBcd(current.getMonth() + 1);
+                    case 9:
+                        return toBcd(current.getFullYear());
+                }
+            } else {
+                return this.store[this.cmosAddr] & 0xff;
+            }
+        }
+        return 0xff;
+    }
+
+    writeControl(portBpins, portApins, IC32) {
+        this.enabled = !!(portBpins & 0x40);
+        if (!this.enabled) return;
+        const oldDataSelect = this.dataSelect;
+        const oldAddressSelect = this.addressSelect;
+        this.isRead = !!(IC32 & 2);
+        this.dataSelect = !!(IC32 & 4);
+        this.addressSelect = !!(portBpins & 0x80);
+        if (oldAddressSelect && !this.addressSelect) this.cmosAddr = portApins & 0x3f;
+        if (oldDataSelect && !this.dataSelect && !this.addressSelect && !this.isRead) {
+            if (this.cmosAddr > 0xb) {
+                this.store[this.cmosAddr] = portApins;
+                this.save();
+            } else {
+                const bbcTime = this.bbcDateTime();
+                switch (this.cmosAddr) {
+                    case 0:
+                        bbcTime.setSeconds(fromBcd(portApins));
+                        break;
+                    case 2:
+                        bbcTime.setMinutes(fromBcd(portApins));
+                        break;
+                    case 4:
+                        bbcTime.setHours(fromBcd(portApins));
+                        break;
+                    // I tried some day offset stuff to lazily simulate the fact the day is separate
+                    // from the date, but I couldn't easily get it to work during the multi-write update
+                    // cycle/ I'm probably being dumb. Or else I should emulate the clock "properly" but
+                    // that seems like an awful lot of work.
+                    // case 6:
+                    //     dayOffset = (bbcTime.getDay() - fromBcd(portApins - 1)) % 7;
+                    //     break;
+                    case 7:
+                        bbcTime.setDate(fromBcd(portApins));
+                        break;
+                    case 8:
+                        bbcTime.setMonth(fromBcd(portApins - 1));
+                        break;
+                    case 9: {
+                        const yearBase = fromBcd(portApins) > 80 ? 1900 : 2000;
+                        bbcTime.setFullYear(fromBcd(portApins) + yearBase);
+                        break;
+                    }
+                }
+                const secondsNow = Math.floor(this.now() / 1000) * 1000;
+                this.timeOffset = bbcTime.getTime() - secondsNow;
+            }
+        }
+    }
+}

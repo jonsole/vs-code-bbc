@@ -1,0 +1,31 @@
+.start
+     1900   A9 16      LDA #&16
+     1902   20 EE FF   JSR &FFEE
+     1905   A9 07      LDA #&07
+     1907   20 EE FF   JSR &FFEE
+     190A   A9 00      LDA #&00
+     190C   85 70      STA &70
+.again
+     190E   20 1A 19   JSR &191A
+     1911   E6 70      INC &70
+     1913   A5 70      LDA &70
+     1915   C9 05      CMP #&05
+     1917   D0 F5      BNE &190E
+     1919   60         RTS
+.print_message
+     191A   A2 00      LDX #&00
+.loop
+     191C   BD 28 19   LDA &1928,X
+     191F   F0 06      BEQ &1927
+     1921   20 EE FF   JSR &FFEE
+     1924   E8         INX
+     1925   D0 F5      BNE &191C
+.done
+     1927   60         RTS
+.message
+     1928   48 65 6C ...
+     194F   0D
+     1950   0A
+     1951   00
+.end
+Saving file 'HELLO'

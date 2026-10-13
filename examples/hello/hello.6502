@@ -1,0 +1,45 @@
+\ hello.6502 -- a first BBC Micro program, for BeebAsm.
+\
+\ Build:  beebasm -i hello.6502 -do build/hello.ssd -boot HELLO -v -dd -labels build/hello.labels > build/hello.lst
+\ (the VS Code task "beebasm: hello" in .vscode/tasks.json does exactly this)
+
+oswrch = &FFEE
+osbyte = &FFF4
+
+counter = &70               \ zero page: how many times round
+
+ORG &1900
+
+.start
+    LDA #22: JSR oswrch     \ MODE 7
+    LDA #7:  JSR oswrch
+    LDA #0
+    STA counter
+
+.again
+    JSR print_message
+    INC counter
+    LDA counter
+    CMP #5
+    BNE again
+    RTS
+
+\ Print the zero-terminated message, with OSWRCH.
+.print_message
+{
+    LDX #0
+.loop
+    LDA message,X
+    BEQ done
+    JSR oswrch
+    INX
+    BNE loop
+.done
+    RTS
+}
+
+.message
+    EQUS "Hello from BeebAsm, debugged in VS Code", 13, 10, 0
+.end
+
+SAVE "HELLO", start, end

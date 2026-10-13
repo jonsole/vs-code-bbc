@@ -1,0 +1,166 @@
+import { deflate } from "pako";
+import { typedArrayToBase64, base64ToTypedArray, bytesToTypedArray } from "./state-utils.js";
+import { findModel } from "./models.js";
+import { inflate } from "./archive.js";
+
+const SnapshotFormat = "jsbeeb-snapshot";
+const SnapshotVersion = 4;
+
+const CompressedArrayEncoding = "deflate";
+// Smaller arrays (registers, palettes) gain too little to pay for a deflate call and its header.
+const CompressArraysFromBytes = 1024;
+// A session's join waits on this; the default level 6 takes over twice as long to save a sixth of the bytes.
+const ArrayCompressionLevel = 1;
+
+/**
+ * Whether a snapshot was taken on a machine with a second processor fitted.
+ * Nothing before version 3 captured tube state, so those snapshots are always host-only.
+ */
+export function hasCoProcessor(snapshot) {
+    return !!snapshot.coProcessor;
+}
+
+/**
+ * Check if two model names resolve to the same model (accounting for
+ * synonyms and old names). Used to decide whether a page reload is
+ * needed when loading a snapshot saved under a different model name.
+ */
+export function isSameModel(nameA, nameB) {
+    if (nameA === nameB) return true;
+    const a = findModel(nameA);
+    const b = findModel(nameB);
+    return a !== null && a === b;
+}
+
+// Map of TypedArray constructor names for deserialization
+const TypedArrayConstructors = {
+    Uint8Array,
+    Uint16Array,
+    Uint32Array,
+    Int32Array,
+    Float32Array,
+    Float64Array,
+};
+
+/**
+ * Create a snapshot of the emulator state for save-to-file.
+ * Disc track pulse data is stripped — on restore, the discs are reloaded
+ * from the source references in the `media` field. (The in-memory rewind
+ * path uses cpu.snapshotState() directly, which retains full disc data.)
+ * @param {import('./6502.js').Cpu6502} cpu
+ * @param {object} model - the model definition object
+ * @param {object} [media] - optional media source references (disc1, disc2)
+ * @returns {object} snapshot object
+ */
+export function createSnapshot(cpu, model, media) {
+    const state = cpu.snapshotState();
+    // Strip clean disc track data from the save-to-file snapshot.
+    // The FDC/drive mechanical state is kept; only clean tracks
+    // (which can be reloaded from the disc image) are removed.
+    // Dirty tracks (written since disc load) are kept as an overlay.
+    if (state.fdc && state.fdc.drives) {
+        for (const drive of state.fdc.drives) {
+            if (drive.disc) {
+                const dirtyTracks = {};
+                for (const key of Object.keys(drive.disc.tracks)) {
+                    const [sideStr, trackNumStr] = key.split(":");
+                    const isSideUpper = sideStr === "true";
+                    const trackNum = parseInt(trackNumStr, 10);
+                    const dirtyKey = trackNum | (isSideUpper ? 0x100 : 0);
+                    if (drive.disc._everDirtyTracks && drive.disc._everDirtyTracks.has(dirtyKey)) {
+                        dirtyTracks[key] = drive.disc.tracks[key];
+                    }
+                }
+                drive.disc.tracks = {};
+                drive.disc.dirtyTracks = dirtyTracks;
+                // Clean up internal-only fields not needed in serialized state
+                delete drive.disc._everDirtyTracks;
+                delete drive.disc._originalImageData;
+                delete drive.disc._originalImageCrc32;
+            }
+        }
+    }
+    const snapshot = {
+        format: SnapshotFormat,
+        version: SnapshotVersion,
+        model: model.name,
+        // The model name cannot distinguish a Turbo from a plain Master: the co-processor is
+        // emulation config rather than part of the model.
+        coProcessor: cpu.hasTube,
+        timestamp: new Date().toISOString(),
+        state,
+    };
+    if (media) snapshot.media = media;
+    return snapshot;
+}
+
+/**
+ * Restore emulator state from a snapshot.
+ * @param {import('./6502.js').Cpu6502} cpu
+ * @param {object} model - the current model definition
+ * @param {object} snapshot
+ * @throws {Error} if the model doesn't match
+ */
+export function restoreSnapshot(cpu, model, snapshot) {
+    if (snapshot.format !== SnapshotFormat) {
+        throw new Error(`Unknown snapshot format: ${snapshot.format}`);
+    }
+    if (snapshot.version > SnapshotVersion) {
+        throw new Error(`Snapshot version ${snapshot.version} is newer than supported version ${SnapshotVersion}`);
+    }
+    if (!isSameModel(snapshot.model, model.name)) {
+        throw new Error(`Model mismatch: snapshot is for "${snapshot.model}" but current model is "${model.name}"`);
+    }
+    if (hasCoProcessor(snapshot) !== cpu.hasTube) {
+        const fitted = (yes) => (yes ? "with a second processor" : "without a second processor");
+        throw new Error(
+            `Co-processor mismatch: snapshot was taken ${fitted(hasCoProcessor(snapshot))} ` +
+                `but this machine is ${fitted(cpu.hasTube)}`,
+        );
+    }
+    cpu.restoreState(snapshot.state);
+}
+
+function encodeTypedArray(array) {
+    const bytes = new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
+    const type = array.constructor.name;
+    if (bytes.length < CompressArraysFromBytes) return { __typedArray: true, type, data: typedArrayToBase64(bytes) };
+    return {
+        __typedArray: true,
+        type,
+        encoding: CompressedArrayEncoding,
+        data: typedArrayToBase64(deflate(bytes, { level: ArrayCompressionLevel })),
+    };
+}
+
+function decodeTypedArray({ type, encoding, data }) {
+    const Constructor = TypedArrayConstructors[type];
+    if (!Constructor) {
+        throw new Error(`Unknown TypedArray type: ${type}`);
+    }
+    if (encoding === undefined) return base64ToTypedArray(data, Constructor);
+    if (encoding !== CompressedArrayEncoding) {
+        throw new Error(`Unknown TypedArray encoding: ${encoding}`);
+    }
+    return bytesToTypedArray(inflate(base64ToTypedArray(data, Uint8Array)), Constructor);
+}
+
+/**
+ * Serialize a snapshot to a JSON string, converting TypedArrays to base64, deflating the large ones first.
+ * @param {object} snapshot
+ * @returns {string} JSON string
+ */
+export function snapshotToJSON(snapshot) {
+    return JSON.stringify(snapshot, (key, value) =>
+        ArrayBuffer.isView(value) && !(value instanceof DataView) ? encodeTypedArray(value) : value,
+    );
+}
+
+/**
+ * Deserialize a snapshot from a JSON string, converting base64 back to TypedArrays.
+ * @param {string} json
+ * @returns {object} snapshot object
+ */
+export function snapshotFromJSON(json) {
+    return JSON.parse(json, (key, value) => (value && value.__typedArray ? decodeTypedArray(value) : value));
+}

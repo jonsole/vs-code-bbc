@@ -1,0 +1,5 @@
+node_modules/
+!vendor/jsbeeb/node_modules/
+*.vsix
+.DS_Store
+examples/**/build/raw-test.bin

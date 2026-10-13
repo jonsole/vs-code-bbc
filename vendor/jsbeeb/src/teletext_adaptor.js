@@ -1,0 +1,233 @@
+import { loadData } from "./loader.js";
+
+// Code ported from Beebem (C to .js) by Jason Robson
+const TELETEXT_IRQ = 5;
+const TELETEXT_FRAME_SIZE = 860;
+const TELETEXT_UPDATE_FREQ = 50000;
+
+/*
+
+Offset  Description                 Access  
++00     Status register             R/W
++01     Row register
++02     Data register
++03     Clear status register
+
+Status register:
+  Read
+   Bits     Function
+   0-3      Link settings
+   4        FSYN (Latches high on Field sync)
+   5        DEW (Data entry window)
+   6        DOR (Latches INT on end of DEW)
+   7        INT (latches high on end of DEW)
+  
+  Write
+   Bits     Function
+   0-1      Channel select
+   2        Teletext Enable
+   3        Enable Interrupts
+   4        Enable AFC (and mystery links A)
+   5        Mystery links B
+
+*/
+
+/**
+ * Emulates the Acorn teletext adaptor. Dispatches a `notice` CustomEvent, carrying a
+ * `message` in its detail, when a channel's stream cannot be loaded.
+ */
+export class TeletextAdaptor extends EventTarget {
+    constructor(cpu) {
+        super();
+        this.cpu = cpu;
+        // Not cleared by a reset, so a fetch still in flight across one is recognised as stale.
+        this.streamRequest = 0;
+        this.clearState();
+    }
+
+    clearState() {
+        this.teletextStatus = 0x0f; /* low nibble comes from LK4-7 and mystery links which are left floating */
+        this.teletextInts = false;
+        this.teletextEnable = false;
+        this.channel = 0;
+        this.currentFrame = 0;
+        this.totalFrames = 0;
+        this.rowPtr = 0x00;
+        this.colPtr = 0x00;
+        this.streamData = null;
+        this.pollCount = 0;
+        this.frameBuffer = new Array(16).fill(0).map(() => new Array(64).fill(0));
+        // Only a register access clears our IRQ, so an interrupt latched before the reset would hang the machine.
+        this.cpu.interrupt &= ~(1 << TELETEXT_IRQ);
+    }
+
+    reset(hard) {
+        if (!hard) return;
+        this.clearState();
+        this.loadChannelStream(this.channel);
+    }
+
+    async loadChannelStream(channel) {
+        console.log("Teletext adaptor: switching to channel " + channel);
+        const request = ++this.streamRequest;
+        let data;
+        try {
+            data = await loadData(`teletext/txt${channel}.dat`);
+        } catch (error) {
+            if (request !== this.streamRequest) return;
+            console.error(`Teletext adaptor: failed to load channel ${channel}`, error);
+            this.dispatchEvent(
+                new CustomEvent("notice", {
+                    detail: {
+                        message: `Teletext channel ${channel} could not be loaded (${error?.message ?? error}). The adaptor carries on with nothing to show.`,
+                    },
+                }),
+            );
+            return;
+        }
+        // Fetches can resolve out of order; only the newest request may apply its data.
+        if (request !== this.streamRequest) return;
+        this.streamData = data;
+        this.totalFrames = Math.floor(data.length / TELETEXT_FRAME_SIZE);
+        this.currentFrame = 0;
+    }
+
+    updateIrq() {
+        if (this.teletextInts && this.teletextStatus & 0x80) {
+            this.cpu.interrupt |= 1 << TELETEXT_IRQ;
+        } else {
+            this.cpu.interrupt &= ~(1 << TELETEXT_IRQ);
+        }
+    }
+
+    snapshotState() {
+        return {
+            teletextStatus: this.teletextStatus,
+            teletextInts: this.teletextInts,
+            teletextEnable: this.teletextEnable,
+            channel: this.channel,
+            currentFrame: this.currentFrame,
+            rowPtr: this.rowPtr,
+            colPtr: this.colPtr,
+            pollCount: this.pollCount,
+            frameBuffer: this.frameBuffer.map((row) => row.slice()),
+        };
+    }
+
+    restoreState(state) {
+        this.teletextStatus = state.teletextStatus;
+        this.teletextInts = state.teletextInts;
+        this.teletextEnable = state.teletextEnable;
+        this.currentFrame = state.currentFrame;
+        this.rowPtr = state.rowPtr;
+        this.colPtr = state.colPtr;
+        this.pollCount = state.pollCount;
+        this.frameBuffer = state.frameBuffer.map((row) => row.slice());
+        this.updateIrq();
+        // Refetching the multi-megabyte stream on every restore would be ruinous for rewind.
+        if (this.channel !== state.channel) {
+            this.channel = state.channel;
+            this.loadChannelStream(this.channel);
+        }
+    }
+
+    read(addr) {
+        let data = 0x00;
+
+        switch (addr) {
+            case 0x00: // Status Register
+                data = this.teletextStatus;
+                break;
+            case 0x01: // Row Register
+                break;
+            case 0x02: // Data Register
+                data = this.frameBuffer[this.rowPtr][this.colPtr++];
+                break;
+            case 0x03:
+                this.teletextStatus &= ~0xd0; // Clear INT, DOR, and FSYN latches
+                this.cpu.interrupt &= ~(1 << TELETEXT_IRQ);
+                break;
+        }
+
+        return data;
+    }
+
+    write(addr, value) {
+        switch (addr) {
+            case 0x00:
+                // Status register
+                this.teletextInts = (value & 0x08) === 0x08;
+                this.updateIrq();
+                this.teletextEnable = (value & 0x04) === 0x04;
+                if ((value & 0x03) !== this.channel && this.teletextEnable) {
+                    this.channel = value & 0x03;
+                    this.loadChannelStream(this.channel);
+                }
+                break;
+
+            case 0x01:
+                this.rowPtr = value;
+                this.colPtr = 0x00;
+                break;
+
+            case 0x02:
+                this.frameBuffer[this.rowPtr][this.colPtr++] = value & 0xff;
+                break;
+
+            case 0x03:
+                this.teletextStatus &= ~0xd0; // Clear INT, DOR, and FSYN latches
+                this.cpu.interrupt &= ~(1 << TELETEXT_IRQ); // Clear interrupt
+                break;
+        }
+    }
+
+    // Attempt to emulate the TV broadcast
+    polltime(cycles) {
+        this.pollCount += cycles;
+        if (this.pollCount > TELETEXT_UPDATE_FREQ) {
+            this.pollCount = 0;
+            // Don't flood the processor with teletext interrupts during a reset
+            if (this.cpu.resetLine) {
+                this.update();
+            } else {
+                // Grace period before we start up again
+                this.pollCount = -TELETEXT_UPDATE_FREQ * 10;
+            }
+        }
+    }
+
+    update() {
+        if (this.currentFrame >= this.totalFrames) {
+            this.currentFrame = 0;
+        }
+
+        const offset = this.currentFrame * TELETEXT_FRAME_SIZE + 3 * 43;
+
+        this.teletextStatus &= 0x0f;
+        this.teletextStatus |= 0xd0; // data ready so latch INT, DOR, and FSYN
+
+        // The stream arrives asynchronously, so software can enable us before there is anything to copy.
+        if (this.teletextEnable && this.streamData) {
+            // Copy current stream position into the frame buffer
+            for (let i = 0; i < 16; ++i) {
+                if (this.streamData[offset + i * 43] !== 0) {
+                    this.frameBuffer[i][0] = 0x67;
+                    for (let j = 1; j <= 42; j++) {
+                        this.frameBuffer[i][j] = this.streamData[offset + (i * 43 + (j - 1))];
+                    }
+                } else {
+                    this.frameBuffer[i][0] = 0x00;
+                }
+            }
+        }
+
+        this.currentFrame++;
+
+        this.rowPtr = 0x00;
+        this.colPtr = 0x00;
+
+        if (this.teletextInts) {
+            this.cpu.interrupt |= 1 << TELETEXT_IRQ;
+        }
+    }
+}
