@@ -16,7 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { allModels } from "../vendor/jsbeeb/src/models.js";
-import { hex } from "./engine.mjs";
+import { hex, isBanked } from "./engine.mjs";
 import { loadProgram } from "./program.mjs";
 
 const ProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -35,7 +35,17 @@ const tubeParam = {
 };
 const addressParam = {
     type: ["string", "integer"],
-    description: 'An address: &1900, $1900, 0x1900, 6400, a symbol, or an expression such as "table+2"',
+    description:
+        'An address: &1900, $1900, 0x1900, 6400, a symbol, or an expression such as "table+2". In &8000-&BFFF it may name a ' +
+        'sideways bank in front, "4:&8000", for that address with bank 4 paged in.',
+};
+const bankParam = {
+    type: "integer",
+    minimum: 0,
+    maximum: 15,
+    description:
+        "A sideways ROM/RAM bank, 0-15: only while that bank is paged in at the address (&8000-&BFFF). The same as writing it in front " +
+        'of the address ("4:&8000"). Omitted: whatever is paged in, as a plain address has always meant.',
 };
 const pagingParams = {
     bank: { type: "integer", minimum: 0, maximum: 15, description: "Sideways ROM/RAM bank to page in at &8000-&BFFF for this access" },
@@ -110,6 +120,9 @@ const Moving = new Set([
 // Tools that reset or replace the machine: worth a warning when a person is debugging it.
 const Resetting = new Set(["reset", "load_program", "run_basic", "restore_state", "load_snapshot"]);
 
+// "4:" or "F:" in front of an address: a sideways bank, in decimal or one hex digit.
+const BankPrefix = /^\s*(1[0-5]|[0-9]|[A-Fa-f])\s*:/;
+
 const keySelector = (a) => ({ key: a.key, internal: a.internal, inkey: a.inkey, col: a.col, row: a.row });
 
 // Saved states stay here and only their ids cross the connection. About 0.4MB
@@ -164,7 +177,27 @@ function decodeSoundWrites(writes) {
 }
 
 export function makeTools(engine, serverInfo) {
-    const addr = (v) => engine.resolveAddress(v);
+    const addr = (v) => engine.resolveAddress(typeof v === "string" ? v.replace(BankPrefix, "") : v);
+    /**
+     * An address and the sideways bank it names, if it names one: "4:&8000",
+     * or a plain address with `bank` beside it. A bank anywhere but
+     * &8000-&BFFF is refused: nothing else is banked.
+     */
+    const banked = (a) => {
+        let bank;
+        const m = typeof a.address === "string" ? BankPrefix.exec(a.address) : null;
+        if (m) bank = parseInt(m[1], /^[0-9]+$/.test(m[1]) ? 10 : 16);
+        if (a.bank !== undefined) {
+            if (bank !== undefined && bank !== a.bank) throw new Error(`The address names bank ${bank} and bank says ${a.bank}`);
+            bank = a.bank;
+        }
+        const address = addr(a.address);
+        if (bank !== undefined) {
+            if (!(Number.isInteger(bank) && bank >= 0 && bank <= 15)) throw new Error("A sideways bank is 0-15");
+            if (!isBanked(address)) throw new Error(`Only &8000-&BFFF is banked: ${hex(address)} is the same whatever bank is paged in`);
+        }
+        return { address, bank };
+    };
     const states = new Map(); // id -> { model, label, saved_at, snapshot }
 
     const stoppedReason = (stop) => {
@@ -273,6 +306,7 @@ export function makeTools(engine, serverInfo) {
                     boot: { type: "boolean", description: "Start the program (default true); false loads it and leaves the machine at the BASIC prompt" },
                     debug_info: { type: "array", items: { type: "string" }, description: "Symbol files: BeebAsm -labels output, a BeebAsm -v listing (with source), a ca65 .dbg, or VICE labels" },
                     source: { type: "string", description: "The main source file a BeebAsm listing came from" },
+                    rom_bank: { ...bankParam, description: "For a sideways ROM's debug info: the bank its code at &8000-&BFFF is in" },
                     stop_at: addressParam,
                 },
                 required: ["path"],
@@ -289,6 +323,7 @@ export function makeTools(engine, serverInfo) {
                     boot: a.boot,
                     debugInfo: a.debug_info?.map((f) => path.resolve(f)),
                     source: a.source && path.resolve(a.source),
+                    romBank: a.rom_bank,
                     stopAt: a.stop_at,
                 });
                 if (!r.stop) engine.resume();
@@ -459,6 +494,7 @@ export function makeTools(engine, serverInfo) {
                 type: "object",
                 properties: {
                     address: addressParam,
+                    bank: bankParam,
                     condition: { type: "string" },
                     hit_count: { type: "string", description: 'e.g. "3" (from the 3rd hit), "==5", "%10"' },
                     log_message: { type: "string" },
@@ -466,26 +502,29 @@ export function makeTools(engine, serverInfo) {
                 required: ["address"],
             },
             run: (a) => {
-                const existing = engine.breakpoints(McpOwner).map(({ id, address, condition, hitCondition, logMessage, kind }) => ({ id, address, condition, hitCondition, logMessage, kind }));
-                const address = addr(a.address);
+                const existing = engine.breakpoints(McpOwner).map(({ id, address, bank, condition, hitCondition, logMessage, kind }) => ({ id, address, bank, condition, hitCondition, logMessage, kind }));
+                const { address, bank } = banked(a);
                 const list = engine.setBreakpoints(McpOwner, [
-                    ...existing.filter((b) => b.address !== address),
-                    { address, condition: a.condition, hitCondition: a.hit_count, logMessage: a.log_message, kind: "instruction" },
+                    ...existing.filter((b) => !(b.address === address && b.bank === bank)),
+                    { address, bank, condition: a.condition, hitCondition: a.hit_count, logMessage: a.log_message, kind: "instruction" },
                 ]);
-                const bp = list.find((b) => b.address === address);
+                const bp = list.find((b) => b.address === address && b.bank === bank);
                 if (!bp.verified) throw new Error(bp.message);
-                return { id: bp.id, address: engine.describeAddress(address), instruction: engine.disassemble(address).text };
+                return { id: bp.id, address: engine.describeAddress(address, bank), instruction: engine.disassemble(address).text };
             },
         },
         clear_breakpoint: {
-            description: "Remove one of MCP's breakpoints, by address or by id; with neither, all of them.",
-            inputSchema: { type: "object", properties: { address: addressParam, id: { type: "integer" } } },
+            description: "Remove one of MCP's breakpoints, by address (and bank, for a banked one) or by id; with neither, all of them.",
+            inputSchema: { type: "object", properties: { address: addressParam, bank: bankParam, id: { type: "integer" } } },
             run: (a) => {
                 const all = engine.breakpoints(McpOwner);
-                const target = a.address !== undefined ? addr(a.address) : undefined;
-                const keep = a.address === undefined && a.id === undefined ? [] : all.filter((b) => b.address !== target && b.id !== a.id);
+                const target = a.address !== undefined ? banked(a) : undefined;
+                const keep =
+                    a.address === undefined && a.id === undefined
+                        ? []
+                        : all.filter((b) => !(target && b.address === target.address && b.bank === target.bank) && b.id !== a.id);
                 engine.setBreakpoints(McpOwner, keep);
-                return { removed: all.length - keep.length, remaining: keep.map((b) => engine.describeAddress(b.address)) };
+                return { removed: all.length - keep.length, remaining: keep.map((b) => engine.describeAddress(b.address, b.bank)) };
             },
         },
         list_breakpoints: {
@@ -494,7 +533,7 @@ export function makeTools(engine, serverInfo) {
                 engine
                     .breakpoints()
                     .filter((b) => !b.internal)
-                    .map((b) => ({ id: b.id, owner: b.owner, address: engine.describeAddress(b.address), condition: b.condition, hit_count: b.hitCondition, log_message: b.logMessage, hits: b.hits })),
+                    .map((b) => ({ id: b.id, owner: b.owner, address: engine.describeAddress(b.address, b.bank), condition: b.condition, hit_count: b.hitCondition, log_message: b.logMessage, hits: b.hits })),
         },
         set_watchpoint: {
             description:
@@ -506,6 +545,7 @@ export function makeTools(engine, serverInfo) {
                 type: "object",
                 properties: {
                     address: addressParam,
+                    bank: bankParam,
                     length: { type: "integer", minimum: 1, description: "Bytes covered from address (default 1): a whole record in one watchpoint" },
                     access: { type: "string", enum: ["write", "read", "readwrite"] },
                     on_change: { type: "boolean", description: "Only a write that changes the value (default true)" },
@@ -516,9 +556,12 @@ export function makeTools(engine, serverInfo) {
                 required: ["address"],
             },
             run: (a) => {
+                const where = banked(a);
+                if (where.bank !== undefined && where.address + (a.length ?? 1) > 0xc000) throw new Error("A watchpoint for one bank must stay inside &8000-&BFFF");
                 const w = engine.addWatchpoint({
                     owner: McpOwner,
-                    address: addr(a.address),
+                    address: where.address,
+                    bank: where.bank,
                     length: a.length ?? 1,
                     access: a.access ?? "write",
                     condition: a.condition,
@@ -526,7 +569,7 @@ export function makeTools(engine, serverInfo) {
                     value: a.value,
                     notValue: a.not_value,
                 });
-                return { id: w.id, watching: `${w.length} byte(s) at ${engine.describeAddress(w.address)} for ${w.access}`, on_change: w.onChange };
+                return { id: w.id, watching: `${w.length} byte(s) at ${engine.describeAddress(w.address, w.bank)} for ${w.access}`, on_change: w.onChange };
             },
         },
         clear_watchpoint: {
@@ -544,7 +587,7 @@ export function makeTools(engine, serverInfo) {
                 engine.watchpoints().map((w) => ({
                     id: w.id,
                     owner: w.owner,
-                    address: engine.describeAddress(w.address),
+                    address: engine.describeAddress(w.address, w.bank),
                     length: w.length,
                     access: w.access,
                     on_change: w.onChange,
@@ -568,7 +611,8 @@ export function makeTools(engine, serverInfo) {
                 "than disturbing the hardware.",
             inputSchema: { type: "object", properties: { address: addressParam, length: { type: "integer", minimum: 1, maximum: 4096, description: "Bytes, default 64" }, ...pagingParams }, required: ["address"] },
             run: (a) => {
-                const start = addr(a.address);
+                const { address: start, bank } = banked(a);
+                a = { ...a, bank };
                 const length = Math.max(1, Math.min(4096, a.length ?? 64, 0x10000 - start));
                 const bytes = engine.readMemory(start, length, { bank: a.bank, shadow: a.shadow });
                 const paging = { ...engine.paging(), ...(a.bank !== undefined && { bank: a.bank }), ...(a.shadow !== undefined && { shadow: a.shadow }) };
@@ -583,7 +627,8 @@ export function makeTools(engine, serverInfo) {
                 required: ["address", "data"],
             },
             run: (a) => {
-                const start = addr(a.address);
+                const { address: start, bank } = banked(a);
+                a = { ...a, bank };
                 const bytes = parseBytes(a.data);
                 engine.writeMemory(start, bytes, { bank: a.bank, shadow: a.shadow });
                 return { written: bytes.length, at: engine.describeAddress(start) };
@@ -602,6 +647,37 @@ export function makeTools(engine, serverInfo) {
                 const file = path.resolve(a.path);
                 fs.writeFileSync(file, engine.readMemory(start, length, { bank: a.bank, shadow: a.shadow }));
                 return { saved: length, from: hex(start), path: file, paging: engine.paging() };
+            },
+        },
+        set_paging: {
+            description:
+                "Change what is paged in, as a debugger: bank, the sideways ROM/RAM bank at &8000-&BFFF (ROMSEL), and on a Master acccon, its " +
+                "ACCCON byte (shadow RAM and the rest). Name only what should change. read_memory and write_memory with a bank reach one " +
+                "without changing what is paged.",
+            inputSchema: { type: "object", properties: { bank: bankParam, acccon: { type: "integer", minimum: 0, maximum: 255 } } },
+            run: (a) => ({ paging: engine.setPaging({ bank: a.bank, acccon: a.acccon }) }),
+        },
+        load_rom: {
+            description:
+                "Put a sideways ROM (or RAM) image, up to 16K, into a bank 0-15, from a file. The MOS finds sideways ROMs at a reset, so by " +
+                "default this resets the machine afterwards (a BREAK; reset: false leaves that to you), and the ROM's *commands and service " +
+                "calls work from then on.",
+            inputSchema: {
+                type: "object",
+                properties: { path: { type: "string" }, bank: bankParam, reset: { type: "boolean" } },
+                required: ["path", "bank"],
+            },
+            run: async (a) => {
+                const data = fs.readFileSync(path.resolve(a.path));
+                engine.pause("Loading a ROM", { internal: true });
+                engine.loadSidewaysRom(a.bank, data);
+                if (a.reset !== false) {
+                    await engine.reset({ hard: false });
+                    await engine.bootToPrompt();
+                }
+                engine.resume();
+                const title = String.fromCharCode(...engine.readMemory(0x8009, 24, { bank: a.bank })).split("\0")[0];
+                return { bank: a.bank, bytes: data.length, title, reset: a.reset !== false };
             },
         },
         get_registers: {
@@ -846,12 +922,17 @@ export function makeTools(engine, serverInfo) {
             description: "Load symbols (and source lines) for the program: BeebAsm -labels output, a BeebAsm -v listing with its source file, a ca65 .dbg, or a VICE label file. Adds to what is loaded unless replace is true.",
             inputSchema: {
                 type: "object",
-                properties: { files: { type: "array", items: { type: "string" } }, source: { type: "string" }, replace: { type: "boolean" } },
+                properties: {
+                    files: { type: "array", items: { type: "string" } },
+                    source: { type: "string" },
+                    replace: { type: "boolean" },
+                    bank: { ...bankParam, description: "For a sideways ROM: the bank its code at &8000-&BFFF is in, so its lines and symbols there are that bank's" },
+                },
                 required: ["files"],
             },
             run: (a) => {
                 if (a.replace) engine.clearDebugInfo();
-                const kinds = engine.loadDebugInfo(a.files.map((f) => path.resolve(f)), { source: a.source && path.resolve(a.source) });
+                const kinds = engine.loadDebugInfo(a.files.map((f) => path.resolve(f)), { source: a.source && path.resolve(a.source), bank: a.bank });
                 return { kinds, symbols: engine.debugInfo.symbols.size, lines: engine.debugInfo.lines.size };
             },
         },

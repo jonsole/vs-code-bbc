@@ -29,6 +29,10 @@ The end-to-end tests start a real `server/main.mjs` on free ports
 that way rather than only by unit test: stepping, stops and loading are only
 really observable through the protocols.
 
+After changing an MCP tool, `node scripts/mcp-docs.mjs` rewrites
+`docs/mcp.md`'s tool tables from the definitions; a new tool must be put in
+one of its groups.
+
 `examples/hello/build/` is checked in so tests and the example run without
 BeebAsm. If you change `hello.6502`, rebuild it with the command at its top.
 

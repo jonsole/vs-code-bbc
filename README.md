@@ -98,6 +98,7 @@ debug in the disassembly view.
 | `program` | `.ssd`/`.dsd`/`.adf` or a zip (SHIFT-BREAK), `.uef` (`*TAPE`, `CHAIN""`), `.bas` (RUN), or a raw binary; a disc can also be `sth:Acornsoft/Elite.zip` or a URL |
 | `model` | `B-DFS1.2` (default), `B-DFS0.9`, `B1770`, `B1770A`, `Master`, `MasterADFS`, `MasterANFS` |
 | `tube` | Fit the second processor (65C02, or the Master's 65C102 Turbo) |
+| `romBank` | For a sideways ROM: the bank (0-15) its code at `&8000`-`&BFFF` is in, so its breakpoints there stop only in that bank |
 | `loadAddress`, `execAddress` | Raw binaries: where it goes, where it starts (`&1900`, `$1900`, `0x1900`) |
 | `run` | What to type to start it instead, e.g. `"*RUN GAME"` or `"CHAIN \"MENU\""` |
 | `debugInfo`, `source` | Symbols and line info, as above |

@@ -246,7 +246,7 @@ export class DapSession {
         args.debugInfo = files;
         if (args.source) args.source = path.resolve(args.cwd ?? ".", args.source);
         if (!keepExisting) this.engine.clearDebugInfo();
-        if (files.length) this.engine.loadDebugInfo(files, { source: args.source });
+        if (files.length) this.engine.loadDebugInfo(files, { source: args.source, bank: args.romBank });
     }
 
     async _start(args) {
@@ -309,7 +309,7 @@ export class DapSession {
         const resolved = specs.map((s) => ({ spec: s, at: info.addressForLine(file, s.line) }));
         const set = this.engine.setBreakpoints(
             `${this.owner}:src:${file}`,
-            resolved.filter((r) => r.at).map((r) => ({ ...r.spec, address: r.at.address, kind: "source" })),
+            resolved.filter((r) => r.at).map((r) => ({ ...r.spec, address: r.at.address, bank: r.at.bank, kind: "source" })),
         );
         let i = 0;
         return resolved.map((r) => {
@@ -441,7 +441,7 @@ export class DapSession {
     on_stackTrace(args) {
         const e = this.engine;
         const frames = e.callStack().map((f, i) => {
-            const at = e.debugInfo.lineFor(f.pc);
+            const at = e.debugInfo.lineFor(f.pc, e.bankAt(f.pc));
             const name = f.kind === "current" ? e.describeAddress(f.pc) : `${e.describeAddress(f.pc)} JSR ${e.symbolFor(f.callee) ?? hex(f.callee)}`;
             const frame = {
                 id: i,
@@ -593,7 +593,7 @@ export class DapSession {
         let lastFile;
         return {
             instructions: list.map((d) => {
-                const at = e.debugInfo.lineFor(d.address);
+                const at = e.debugInfo.lineFor(d.address, e.bankAt(d.address));
                 const insn = {
                     address: memRef(d.address),
                     instructionBytes: d.bytes.map((b) => b.toString(16).toUpperCase().padStart(2, "0")).join(" "),

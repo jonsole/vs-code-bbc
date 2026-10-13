@@ -43,6 +43,15 @@ export class DebugInfo {
         this.lines = new Map(); // address -> { file, line }   (line is 1-based)
         this.fileLines = new Map(); // normalised file -> Map(line -> address)
         this.sources = []; // files loaded from, for server_info
+        // The sideways bank this program's code at &8000-&BFFF is in -- a
+        // sideways ROM's -- when it was loaded with one. Then its lines and
+        // symbols there are that bank's, not whatever else is paged in.
+        this.bank = undefined;
+    }
+
+    /** Whether something at `address` belongs to this program with `paged` paged in there. */
+    _ours(address, paged) {
+        return this.bank === undefined || paged === undefined || !(address >= 0x8000 && address < 0xc000) || paged === this.bank;
     }
 
     get empty() {
@@ -78,7 +87,8 @@ export class DebugInfo {
     }
 
     /** Nearest symbol at or below the address, within `range` bytes: { name, offset } */
-    nearest(address, range = 256) {
+    nearest(address, range = 256, paged = undefined) {
+        if (!this._ours(address, paged)) return undefined;
         let best;
         for (const [a, name] of this.byAddress) {
             if (a <= address && address - a <= range && (!best || a > best.address)) best = { address: a, name };
@@ -86,7 +96,9 @@ export class DebugInfo {
         return best ? { name: best.name, offset: address - best.address } : undefined;
     }
 
-    lineFor(address) {
+    /** The source line at an address, with `paged` the bank paged in there if it is in &8000-&BFFF. */
+    lineFor(address, paged = undefined) {
+        if (!this._ours(address & 0xffff, paged)) return undefined;
         return this.lines.get(address & 0xffff);
     }
 
@@ -98,7 +110,10 @@ export class DebugInfo {
         const m = this.fileLines.get(normalisePath(file));
         if (!m) return undefined;
         for (let l = line; l <= line + slack; l++) {
-            if (m.has(l)) return { line: l, address: m.get(l) };
+            if (!m.has(l)) continue;
+            const address = m.get(l);
+            const bank = this.bank !== undefined && address >= 0x8000 && address < 0xc000 ? this.bank : undefined;
+            return bank === undefined ? { line: l, address } : { line: l, address, bank };
         }
         return undefined;
     }
@@ -108,7 +123,8 @@ export class DebugInfo {
     }
 
     /** Load whatever kind of file this is. `source` is the main source file, for a BeebAsm listing. */
-    loadFile(file, { source } = {}) {
+    loadFile(file, { source, bank } = {}) {
+        if (bank !== undefined) this.bank = bank;
         const text = fs.readFileSync(file, "utf8");
         const kind = detectKind(file, text);
         if (kind === "ca65") loadCa65(this, text, path.dirname(file));

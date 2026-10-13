@@ -78,6 +78,11 @@ export function resolveKeyCode(key) {
     throw new Error(`Unknown key "${key}": use a KeyboardEvent.code such as "KeyA", or a name such as RETURN, SHIFT, ESCAPE`);
 }
 
+/** &8000-&BFFF: whichever of the 16 sideways ROM/RAM banks ROMSEL has paged in. */
+export function isBanked(address) {
+    return address >= 0x8000 && address < 0xc000;
+}
+
 export class Engine extends EventEmitter {
     constructor({ model = "B-DFS1.2", warp = false, tube = false } = {}) {
         super();
@@ -404,6 +409,7 @@ export class Engine extends EventEmitter {
         if (!bps) return false;
         let stop = null;
         for (const bp of bps) {
+            if (bp.bank !== undefined && bp.bank !== this.bankAt(pc)) continue;
             if (bp.condition && !this._safeEval(bp.compiled, bp)) continue;
             bp.hits++;
             if (bp.hitCondition && !hitConditionMet(bp.hitCondition, bp.hits)) continue;
@@ -431,6 +437,7 @@ export class Engine extends EventEmitter {
         for (const w of this._watchpoints.values()) {
             if (w.access !== "readwrite" && w.access !== access) continue;
             if (addr < w.address || addr >= w.address + w.length) continue;
+            if (w.bank !== undefined && w.bank !== this.bankAt(addr)) continue;
             // jsbeeb calls the write hook before the byte is stored, so what is
             // there now is the old value.
             const old = access === "write" ? this.peek(addr) : val;
@@ -518,6 +525,8 @@ export class Engine extends EventEmitter {
                 condition: s.condition || undefined,
                 hitCondition: s.hitCondition || undefined,
                 logMessage: s.logMessage || undefined,
+                // A sideways bank: only while that bank is paged in at the address.
+                bank: isBanked(s.address & 0xffff) && Number.isInteger(s.bank) ? s.bank : undefined,
                 internal: !!s.internal, // the server's own, e.g. a launch's stopAt: its stop is not announced
                 hits: 0,
                 verified: true,
@@ -561,7 +570,7 @@ export class Engine extends EventEmitter {
      * it is off unless asked for). value / notValue: only an access of, or
      * not of, that byte.
      */
-    addWatchpoint({ owner = "mcp", address, length = 1, access = "write", condition, onChange = false, value, notValue }) {
+    addWatchpoint({ owner = "mcp", address, length = 1, access = "write", condition, onChange = false, value, notValue, bank }) {
         if (!["read", "write", "readwrite"].includes(access)) throw new Error(`access must be read, write or readwrite`);
         for (const v of [value, notValue]) {
             if (v !== undefined && !(Number.isInteger(v) && v >= 0 && v <= 255)) throw new Error("a watchpoint watches bytes: the value must be 0-255");
@@ -578,6 +587,7 @@ export class Engine extends EventEmitter {
             onChange: value === undefined && notValue === undefined && onChange,
             value,
             notValue,
+            bank: isBanked(address & 0xffff) && Number.isInteger(bank) ? bank : undefined,
             hits: 0,
         };
         if (condition) w.compiled = compile(condition);
@@ -693,10 +703,19 @@ export class Engine extends EventEmitter {
         return compile(text)(this._exprContext());
     }
 
-    /** An address in a form a person can read: &1904 (loop+2) */
-    describeAddress(address) {
-        const near = this.debugInfo.nearest(address) ?? this._osSymbol(address);
-        const base = hex(address);
+    /** The sideways bank paged in at an address in &8000-&BFFF, or undefined anywhere else. */
+    bankAt(address) {
+        return isBanked(address) ? this.cpu.romsel & 0x0f : undefined;
+    }
+
+    /**
+     * An address in a form a person can read: &1904 (loop+2), and in
+     * &8000-&BFFF with its sideways bank in front -- the bank paged in now
+     * unless `bank` says which: 4:&8012 (service+3).
+     */
+    describeAddress(address, bank = this.bankAt(address)) {
+        const near = this.debugInfo.nearest(address, 256, bank) ?? this._osSymbol(address);
+        const base = (isBanked(address) && bank !== undefined ? `${bank}:` : "") + hex(address);
         if (!near) return base;
         return near.offset ? `${base} (${near.name}+${near.offset})` : `${base} (${near.name})`;
     }
@@ -1079,6 +1098,29 @@ export class Engine extends EventEmitter {
         this.programPath = file;
     }
 
+    /** What is paged: romsel (the sideways bank at &8000), and on a Master acccon. */
+    setPaging({ bank, acccon } = {}) {
+        if (bank !== undefined) {
+            if (!Number.isInteger(bank) || bank < 0 || bank > 15) throw new Error("bank is a sideways bank, 0-15");
+            this.cpu.romSelect((this.cpu.romsel & 0xf0) | bank);
+        }
+        if (acccon !== undefined) {
+            if (!this.model.isMaster) throw new Error("Only a Master has ACCCON");
+            this.cpu.writeAcccon(acccon & 0xff);
+        }
+        return this.paging();
+    }
+
+    /**
+     * Put a sideways ROM (or RAM) image into a bank. The MOS looks for
+     * sideways ROMs at a reset, so a ROM is not seen until one.
+     */
+    loadSidewaysRom(bank, data) {
+        if (!Number.isInteger(bank) || bank < 0 || bank > 15) throw new Error("bank is a sideways bank, 0-15");
+        if (data.length > 16384) throw new Error(`A sideways ROM is at most 16K; this is ${data.length} bytes`);
+        this.machine.loadSidewaysRam(bank, data);
+    }
+
     /** The cassette recorder: "play", "stop", "rewind", "eject", or "status". */
     tapeControl(action = "status") {
         const t = this.cpu.tapeInterface;
@@ -1152,9 +1194,10 @@ export class Engine extends EventEmitter {
         return snap.model;
     }
 
-    loadDebugInfo(files, { source } = {}) {
+    /** `bank`: the sideways bank the program's code at &8000-&BFFF is in, for a sideways ROM. */
+    loadDebugInfo(files, { source, bank } = {}) {
         const kinds = [];
-        for (const f of [].concat(files)) kinds.push(this.debugInfo.loadFile(f, { source }));
+        for (const f of [].concat(files)) kinds.push(this.debugInfo.loadFile(f, { source, bank }));
         this.emit("debugInfo");
         return kinds;
     }

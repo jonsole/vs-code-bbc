@@ -71,6 +71,19 @@ call stack without taking the editor over, and a tool that resets the machine
 (`reset`, `load_program`, `run_basic`, `restore_state`, `load_snapshot`) adds
 a `warning` saying so.
 
+## Sideways banks
+
+`&8000`-`&BFFF` is whichever of the 16 sideways ROM/RAM banks is paged in,
+so an address there can name its bank: `"4:&8000"`, or `bank` beside it. A
+breakpoint, watchpoint or logpoint with a bank fires only while that bank is
+paged in there; without one, whatever is, as before. Reported addresses in
+that range carry the bank paged in (`"5:&8102"`). `read_memory` and
+`write_memory` reach a bank without paging it in, `set_paging` pages one in,
+and `load_rom` puts a sideways ROM image into a bank. Debug info for a
+sideways ROM takes the bank its code is in (`load_debug_info(bank)`, or
+`romBank` in a VS Code launch configuration), so its symbols and source
+breakpoints are that bank's alone.
+
 ## Starting it
 
 Registering the server does not start it. VS Code's agent mode starts it
@@ -88,6 +101,8 @@ symbol from the program's debug info, or an expression (`table+2`). See
 `?` marks an optional argument. These tables are generated from
 `server/mcp.mjs`; `tools/list` gives the full schemas.
 
+<!-- tools:start -->
+
 ### The machine
 
 | Tool | Does |
@@ -95,15 +110,18 @@ symbol from the program's debug info, or an expression (`table+2`). See
 | `server_info()` | Which emulator this is: its version, the emulated model, the ports it serves DAP, MCP and the screen on, and the program last loaded. |
 | `get_state()` | The machine at a glance: running or stopped and why, registers and flags, the instruction at PC, breakpoints, watchpoints, a guess at the call stack, and cycles and frames run. |
 | `reset(hard?, autoboot?, model?, tube?)` | Reset the machine: power-on (hard, the default) or BREAK (hard: false); model or tube switch to another machine first. autoboot holds SHIFT through the reset (SHIFT-BREAK) to boot the disc in drive 0, and reports shift_held_at_reset. Typing still pending is dropped (cancelled_typing). Leaves the machine running. |
+| `set_speed(speed?, multiplier?)` | How fast the machine runs while it runs on its own (run, the screen panel): "realtime" (a real 2MHz BBC) or "uncapped" (as fast as the host goes), and a multiplier on real time -- 0.1 a tenth, 0.001 slow enough to watch single writes land, 2 double. The tools that run to somewhere (run_frames, run_until_prompt, step...) always run flat out. |
 
 ### Loading
 
 | Tool | Does |
 |---|---|
-| `load_program(path, model?, tube?, load_address?, exec_address?, run?, boot?, debug_info?, source?, stop_at?)` | Reset the machine, load a program and start it: the usual way in. .ssd/.dsd/.adf discs (or a zip, or a disc reference as load_disc takes) boot with SHIFT-BREAK; .uef tapes are CHAINed; .bas files are BBC BASIC source, tokenised and RUN; anything else is a raw binary, which needs load_address. Left running unless stop_at is given or a breakpoint stops it. |
+| `load_program(path, model?, tube?, load_address?, exec_address?, run?, boot?, debug_info?, source?, rom_bank?, stop_at?)` | Reset the machine, load a program and start it: the usual way in. .ssd/.dsd/.adf discs (or a zip, or a disc reference as load_disc takes) boot with SHIFT-BREAK; .uef tapes are CHAINed; .bas files are BBC BASIC source, tokenised and RUN; anything else is a raw binary, which needs load_address. Left running unless stop_at is given or a breakpoint stops it. |
 | `load_disc(image, drive?)` | Put a disc in a drive without resetting or booting: from a file here (.ssd, .dsd, .adf, or a zip holding one), a file: or http(s): URL, 'sth:Acornsoft/Elite.zip' (Stairway to Hell), or 'hfe:<path>' (the BBC disc archive). Then type_text '*CAT', '*RUN NAME' or 'CHAIN"NAME"'; a disc in drive 1 is ':1.NAME'. |
 | `load_basic(source)` | Tokenise BBC BASIC source and put it at PAGE, as if typed in. Does not run it: type_text RUN, then run_until_prompt. |
 | `run_basic(source, model?, timeout_secs?, screenshot?)` | One step for trying BASIC: reset the machine, load the program, RUN it until it waits at a prompt (or timeout_secs of emulated time pass), and return what it printed and a screenshot. The machine is left stopped where the program finished. |
+| `load_rom(path, bank, reset?)` | Put a sideways ROM (or RAM) image, up to 16K, into a bank 0-15, from a file. The MOS finds sideways ROMs at a reset, so by default this resets the machine afterwards (a BREAK; reset: false leaves that to you), and the ROM's *commands and service calls work from then on. |
+| `tape_control(action?)` | The cassette recorder, for a tape load_program put in: "play", "stop", "rewind", "eject", or "status" (the default). Every reply says what is in it, how far through (0 to 1), and whether PLAY is down, the motor relay on and the tape moving -- the tape moves only while both are. Takes effect at once, mid-run included. |
 
 ### Running
 
@@ -121,12 +139,13 @@ symbol from the program's debug info, or an expression (`table+2`). See
 
 | Tool | Does |
 |---|---|
-| `set_breakpoint(address, condition?, hit_count?, log_message?)` | Stop when execution reaches an address. condition is an expression ("A=&41", "?&70>3", "X<>0 AND C"); hit_count waits for the nth hit; log_message makes a logpoint that records a message ({expressions} in braces) instead of stopping. To stop on a read or write of memory, set_watchpoint. |
-| `clear_breakpoint(address?, id?)` | Remove one of MCP's breakpoints, by address or by id; with neither, all of them. |
+| `set_breakpoint(address, bank?, condition?, hit_count?, log_message?)` | Stop when execution reaches an address. condition is an expression ("A=&41", "?&70>3", "X<>0 AND C"); hit_count waits for the nth hit; log_message makes a logpoint that records a message ({expressions} in braces) instead of stopping. To stop on a read or write of memory, set_watchpoint. |
+| `clear_breakpoint(address?, bank?, id?)` | Remove one of MCP's breakpoints, by address (and bank, for a banked one) or by id; with neither, all of them. |
 | `list_breakpoints()` | Every breakpoint and logpoint set, by MCP or by VS Code, with hit counts. |
-| `set_watchpoint(address, length?, access?, on_change?, value?, not_value?, condition?)` | Stop when the program reads or writes memory in a range: what changed this? By default only a write that CHANGES the value stops it (on_change false: every write). value / not_value: only an access of, or not of, that byte; condition: any expression, with `value` the byte. The stop comes after the instruction that did it, and the run report's watch_stop says the address, the old and new values and the instruction. |
+| `set_watchpoint(address, bank?, length?, access?, on_change?, value?, not_value?, condition?)` | Stop when the program reads or writes memory in a range: what changed this? By default only a write that CHANGES the value stops it (on_change false: every write). value / not_value: only an access of, or not of, that byte; condition: any expression, with `value` the byte. The stop comes after the instruction that did it, and the run report's watch_stop says the address, the old and new values and the instruction. |
 | `clear_watchpoint(id?)` | Remove a watchpoint by id, or all of MCP's. |
 | `list_watchpoints()` | Every watchpoint, with hit counts. |
+| `set_break_on_interrupt(enabled)` | Stop a run at the first instruction of the interrupt handler each time the CPU takes an interrupt (IRQ or NMI): for seeing what a handler does, or what it interrupted. The stop's reason is interrupt, and it says where the interrupt came from. |
 | `get_log(since?, max?)` | What logpoints have reported, after sequence number `since`. |
 
 ### Memory and the CPU
@@ -136,6 +155,7 @@ symbol from the program's debug info, or an expression (`table+2`). See
 | `read_memory(address, length?, bank?, shadow?)` | Read memory as the CPU sees it, as a hex dump, with paging: romsel (the sideways bank at &8000-&BFFF) and on a Master acccon, so a read of paged memory says which bank it came from. bank or shadow read a particular one instead. I/O at &FC00-&FEFF reads as &FF rather than disturbing the hardware. |
 | `write_memory(address, data, bank?, shadow?)` | Write bytes into memory: data is hex ("A9 41 20 EE FF 60") or an array of numbers. bank and shadow as for read_memory. |
 | `save_memory(address, length, path, bank?, shadow?)` | Save a range of memory to a file on this computer: quicker than read_memory for big dumps. bank and shadow as for read_memory. |
+| `set_paging(bank?, acccon?)` | Change what is paged in, as a debugger: bank, the sideways ROM/RAM bank at &8000-&BFFF (ROMSEL), and on a Master acccon, its ACCCON byte (shadow RAM and the rest). Name only what should change. read_memory and write_memory with a bank reach one without changing what is paged. |
 | `get_registers()` | The 6502's registers and flags, the instruction at PC, and the frame and cycle counters. |
 | `set_registers(pc?, a?, x?, y?, s?, p?, c?, z?, i?, d?, v?, n?)` | Change registers or flags while stopped: any of pc, a, x, y, s, p, and the flags c z i d v n (0 or 1). Values may be expressions or symbols. |
 | `disassemble(address?, count?)` | Disassemble instructions from an address (default PC), with symbols and source lines where known. |
@@ -181,9 +201,11 @@ symbol from the program's debug info, or an expression (`table+2`). See
 
 | Tool | Does |
 |---|---|
-| `load_debug_info(files, source?, replace?)` | Load symbols (and source lines) for the program: BeebAsm -labels output, a BeebAsm -v listing with its source file, a ca65 .dbg, or a VICE label file. Adds to what is loaded unless replace is true. |
+| `load_debug_info(files, source?, replace?, bank?)` | Load symbols (and source lines) for the program: BeebAsm -labels output, a BeebAsm -v listing with its source file, a ca65 .dbg, or a VICE label file. Adds to what is loaded unless replace is true. |
 | `resolve_symbol(name)` | A symbol's address. |
 | `resolve_address(address)` | The nearest symbol to an address, and its source line if known. |
+
+<!-- tools:end -->
 
 ## A typical session
 

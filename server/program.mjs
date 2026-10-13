@@ -69,7 +69,7 @@ async function load(engine, opts) {
     engine.pause("Loading", { internal: true });
     await engine.reset({ hard: true, model: opts.model, tube: opts.tube });
     engine.clearDebugInfo();
-    if (opts.debugInfo?.length) engine.loadDebugInfo(opts.debugInfo, { source: opts.source });
+    if (opts.debugInfo?.length) engine.loadDebugInfo(opts.debugInfo, { source: opts.source, bank: opts.romBank });
 
     let stop = await engine.bootToPrompt();
     if (stop) return { kind: "boot", description: "A breakpoint stopped the machine while it booted", stop };

@@ -282,3 +282,50 @@ test("MCP: speed, breaking on interrupts, the tape recorder", async (t) => {
     assert.equal(status.play_pressed, false);
     assert.equal((await tool(server, "tape_control", { action: "eject" })).tape, null);
 });
+
+test("MCP: sideways banks: breakpoints, watchpoints and symbols for one bank", async (t) => {
+    const server = await startServer();
+    t.after(() => server.stop());
+    await tool(server, "run_until_prompt");
+    // Two sideways ROMs with different code at &8100: bank 4 stores &44 at &70, bank 5 &55 at &71.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bbc-roms-"));
+    for (const [bank, code] of [[4, [0xa9, 0x44, 0x85, 0x70, 0x60]], [5, [0xa9, 0x55, 0x85, 0x71, 0x60]]]) {
+        const rom = Buffer.alloc(16384);
+        Buffer.from(code).copy(rom, 0x100);
+        fs.writeFileSync(path.join(dir, `bank${bank}.rom`), rom);
+        const loaded = await tool(server, "load_rom", { path: path.join(dir, `bank${bank}.rom`), bank, reset: false });
+        assert.equal(loaded.bank, bank);
+    }
+    // In RAM: page bank 4 in (and tell the MOS, at &F4), call &8100; the same with bank 5; round again.
+    await tool(server, "pause");
+    await tool(server, "write_memory", { address: "&2000", data: "A9 04 85 F4 8D 30 FE 20 00 81 A9 05 85 F4 8D 30 FE 20 00 81 4C 00 20" });
+    await tool(server, "set_registers", { pc: "&2000" });
+    // The ROM's symbols, as its own: they name bank 4's code and not bank 5's.
+    const labels = path.join(dir, "rom.sym");
+    fs.writeFileSync(labels, "store44 = &8100\n");
+    await tool(server, "load_debug_info", { files: [labels], bank: 4 });
+
+    assert.equal((await tool(server, "read_memory", { address: "5:&8100", length: 2 })).split("\n")[0].slice(0, 12), "&8100  A9 55");
+    await tool(server, "set_breakpoint", { address: "5:&8100" });
+    let stop = await tool(server, "run", { timeout_secs: 1 });
+    assert.equal(stop.stopped_reason, "breakpoint");
+    assert.equal(stop.registers.pc, "5:&8100");
+    await tool(server, "clear_breakpoint", { address: "&8100", bank: 5 });
+    await tool(server, "set_breakpoint", { address: "&8100", bank: 4 });
+    stop = await tool(server, "run", { timeout_secs: 1 });
+    assert.equal(stop.registers.pc, "4:&8100 (store44)");
+    assert.deepEqual((await tool(server, "list_breakpoints")).map((b) => b.address), ["4:&8100 (store44)"]);
+    await tool(server, "clear_breakpoint", {});
+
+    // A watchpoint on bank 5's store, by the bank the store's instruction runs in.
+    await tool(server, "write_memory", { address: "&71", data: [0] });
+    await tool(server, "set_watchpoint", { address: "&71" });
+    stop = await tool(server, "run", { timeout_secs: 1 });
+    assert.equal(stop.watch_stop.by, "5:&8102");
+    await tool(server, "clear_watchpoint", {});
+
+    // set_paging pages a bank in as a debugger.
+    assert.equal((await tool(server, "set_paging", { bank: 4 })).paging.romsel & 15, 4);
+    await assert.rejects(tool(server, "set_breakpoint", { address: "4:&2000" }), /Only &8000-&BFFF is banked/);
+    await assert.rejects(tool(server, "set_breakpoint", { address: "&8100", bank: 16 }), /0-15/);
+});

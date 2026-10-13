@@ -145,6 +145,12 @@
                 "type": "string",
                 "description": "The main source file, when debugInfo has a BeebAsm listing: its lines are matched to the listing."
               },
+              "romBank": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 15,
+                "description": "For a sideways ROM: the bank (0-15) its code at &8000-&BFFF is in. Its source lines and breakpoints there are then that bank's, and stop only while it is paged in."
+              },
               "stopOnEntry": {
                 "type": "boolean",
                 "description": "Stop as soon as the program starts (a raw binary: at execAddress).",

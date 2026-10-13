@@ -61,3 +61,17 @@ test("VICE labels, plain assignments and ca65 .dbg", () => {
     assert.equal(d.lookup("entry"), 0x1900);
     assert.deepEqual(d.lineFor(0x1902), { file: path.join(dir, "game.s"), line: 11 });
 });
+
+test("a sideways ROM's debug info is its bank's", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bbcrom-"));
+    const sym = path.join(dir, "rom.sym");
+    fs.writeFileSync(sym, "service = &8003\nworkspace = &0A00\n");
+    const d = new DebugInfo();
+    d.loadFile(sym, { bank: 4 });
+    assert.equal(d.bank, 4);
+    // A symbol in &8000-&BFFF names bank 4's code, not another bank's at the same address.
+    assert.deepEqual(d.nearest(0x8005, 256, 4), { name: "service", offset: 2 });
+    assert.equal(d.nearest(0x8005, 256, 5), undefined);
+    // Outside the banked region the bank makes no difference.
+    assert.deepEqual(d.nearest(0x0a00, 256, 5), { name: "workspace", offset: 0 });
+});
