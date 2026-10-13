@@ -37,6 +37,7 @@ const SliceMs = 5;
 const MaxSliceCycles = 100000; // 50ms of 2MHz: the most one slice will catch up
 
 const Opcode = { BRK: 0x00, JSR: 0x20, RTI: 0x40, RTS: 0x60 };
+const BreakKey = "F12";
 
 export const PackageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -689,12 +690,20 @@ export class Engine extends EventEmitter {
 
     keyDown(key) {
         this._cancelTypingForKeys();
-        this.machine.keyDown(resolveKeyCode(key));
+        const code = resolveKeyCode(key);
+        // BREAK is not in the keyboard matrix: it pulls the reset line, as F12 does in jsbeeb's page.
+        if (code === BreakKey) {
+            this.session.reset(false);
+            this.emit("reset");
+            return;
+        }
+        this.machine.keyDown(code);
     }
 
     keyUp(key) {
         this._cancelTypingForKeys();
-        this.machine.keyUp(resolveKeyCode(key));
+        const code = resolveKeyCode(key);
+        if (code !== BreakKey) this.machine.keyUp(code);
     }
 
     releaseAllKeys() {
@@ -788,9 +797,9 @@ export class Engine extends EventEmitter {
     }
 
     /**
-     * Save the machine to a file in jsbeeb's own snapshot format (what its web
-     * page saves and loads), with the disc's contents kept in it, so the file
-     * alone brings the machine back.
+     * Save the machine to a file in jsbeeb's own snapshot format, but with the
+     * disc's contents kept in it (jsbeeb's page leaves them out and reloads the
+     * disc), so the file alone brings the machine back.
      */
     saveSnapshot(file) {
         const snap = createSnapshot(this.cpu, this.model, this.programPath ? { program: this.programPath } : undefined);

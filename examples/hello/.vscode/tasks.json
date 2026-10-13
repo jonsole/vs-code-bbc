@@ -1,0 +1,24 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "beebasm: hello",
+      "detail": "Assemble hello.6502 to a bootable disc, with the symbols and listing the debugger reads",
+      "type": "shell",
+      "command": "beebasm -i hello.6502 -do build/hello.ssd -boot HELLO -v -dd -labels build/hello.labels > build/hello.lst",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": {
+        "owner": "beebasm",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^(.*):(\\d+):\\s*(error|warning):\\s*(.*)$",
+          "file": 1,
+          "line": 2,
+          "severity": 3,
+          "message": 4
+        }
+      }
+    }
+  ]
+}

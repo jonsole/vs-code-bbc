@@ -383,7 +383,7 @@ export function makeTools(engine, serverInfo) {
             },
         },
         save_snapshot: {
-            description: "Save the whole machine to a file (jsbeeb's snapshot format, which jsbeeb's web page can load too).",
+            description: "Save the whole machine to a file, in jsbeeb's snapshot format, disc contents included.",
             inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
             run: (a) => ({ saved: path.resolve(a.path), bytes: engine.saveSnapshot(path.resolve(a.path)) }),
         },

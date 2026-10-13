@@ -1,0 +1,56 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "BeebAsm",
+  "scopeName": "source.beebasm",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#label" },
+    { "include": "#mnemonic" },
+    { "include": "#directive" },
+    { "include": "#number" },
+    { "include": "#register" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "comment": {
+      "patterns": [
+        { "name": "comment.line.semicolon.beebasm", "match": ";.*$" },
+        { "name": "comment.line.backslash.beebasm", "match": "\\\\.*$" }
+      ]
+    },
+    "string": {
+      "name": "string.quoted.double.beebasm",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [{ "name": "constant.character.escape.beebasm", "match": "\"\"" }]
+    },
+    "label": {
+      "match": "^\\s*(\\.[A-Za-z_][\\w]*)",
+      "captures": { "1": { "name": "entity.name.function.label.beebasm" } }
+    },
+    "mnemonic": {
+      "name": "keyword.mnemonic.beebasm",
+      "match": "(?i)\\b(ADC|AND|ASL|BCC|BCS|BEQ|BIT|BMI|BNE|BPL|BRA|BRK|BVC|BVS|CLC|CLD|CLI|CLV|CMP|CPX|CPY|DEA|DEC|DEX|DEY|EOR|INA|INC|INX|INY|JMP|JSR|LDA|LDX|LDY|LSR|NOP|ORA|PHA|PHP|PHX|PHY|PLA|PLP|PLX|PLY|ROL|ROR|RTI|RTS|SBC|SEC|SED|SEI|STA|STX|STY|STZ|TAX|TAY|TRB|TSB|TSX|TXA|TXS|TYA)\\b"
+    },
+    "directive": {
+      "name": "keyword.control.directive.beebasm",
+      "match": "(?i)\\b(ORG|CPU|SKIP|SKIPTO|ALIGN|INCLUDE|INCBIN|EQUB|EQUW|EQUD|EQUS|MAPCHAR|GUARD|CLEAR|SAVE|PRINT|ERROR|ASSERT|FOR|NEXT|IF|ELIF|ELSE|ENDIF|MACRO|ENDMACRO|PUTFILE|PUTTEXT|PUTBASIC|RANDOMIZE|COPYBLOCK|FILELINE|CALLSTACK)\\b"
+    },
+    "number": {
+      "patterns": [
+        { "name": "constant.numeric.hex.beebasm", "match": "[&$][0-9A-Fa-f]+\\b" },
+        { "name": "constant.numeric.binary.beebasm", "match": "%[01]+\\b" },
+        { "name": "constant.numeric.decimal.beebasm", "match": "\\b\\d+(\\.\\d+)?\\b" }
+      ]
+    },
+    "register": {
+      "name": "variable.language.register.beebasm",
+      "match": "(?i)(?<=,)\\s*[XY]\\b"
+    },
+    "operator": {
+      "name": "keyword.operator.beebasm",
+      "match": "[-+*/<>=#^|]|\\b(?i:AND|OR|EOR|DIV|MOD|NOT|LO|HI)\\b"
+    }
+  }
+}

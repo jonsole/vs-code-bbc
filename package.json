@@ -32,7 +32,8 @@
   ],
   "scripts": {
     "test": "node --test \"tests/*.test.mjs\"",
-    "server": "node server/main.mjs"
+    "server": "node server/main.mjs",
+    "test:vscode": "node tests/vscode/run.js"
   },
   "contributes": {
     "languages": [
@@ -57,12 +58,24 @@
       }
     ],
     "breakpoints": [
-      { "language": "beebasm" },
-      { "language": "6502" },
-      { "language": "asm6502" },
-      { "language": "ca65" },
-      { "language": "asm" },
-      { "language": "bbcbasic" }
+      {
+        "language": "beebasm"
+      },
+      {
+        "language": "6502"
+      },
+      {
+        "language": "asm6502"
+      },
+      {
+        "language": "ca65"
+      },
+      {
+        "language": "asm"
+      },
+      {
+        "language": "bbcbasic"
+      }
     ],
     "debuggers": [
       {
@@ -252,7 +265,7 @@
       },
       {
         "command": "bbcMicro.typeText",
-        "title": "Type Text at the Keyboard…",
+        "title": "Type Text at the Keyboard\u2026",
         "category": "BBC Micro"
       },
       {
@@ -277,7 +290,7 @@
       },
       {
         "command": "bbcMicro.copyMcpSetup",
-        "title": "Copy MCP Setup for Claude Code…",
+        "title": "Copy MCP Setup for Claude Code\u2026",
         "category": "BBC Micro"
       }
     ],
@@ -348,5 +361,8 @@
         }
       }
     }
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "^2.5.2"
   }
 }

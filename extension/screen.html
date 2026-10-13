@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{nonce}}';">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BBC Micro</title>
+<style>
+  :root { color-scheme: light dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-foreground);
+    font-family: var(--vscode-font-family); font-size: var(--vscode-font-size);
+  }
+  .bar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); flex-wrap: wrap; }
+  button {
+    background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground);
+    border: none; padding: 3px 10px; border-radius: 2px; cursor: pointer; font: inherit;
+  }
+  button:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  button.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .status { margin-left: auto; opacity: 0.8; }
+  .stage { flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; outline: none; position: relative; }
+  .stage:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  canvas { image-rendering: pixelated; background: #000; }
+  .hint { position: absolute; bottom: 8px; left: 0; right: 0; text-align: center; opacity: 0.7; pointer-events: none; }
+  .offline { position: absolute; inset: 0; display: none; flex-direction: column; gap: 10px; align-items: center; justify-content: center; background: var(--vscode-editor-background); }
+  .offline.shown { display: flex; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <button id="pause" title="Pause or resume the machine">Pause</button>
+    <button id="break" title="BREAK: a soft reset">BREAK</button>
+    <button id="reset" title="Power off and on">Power cycle</button>
+    <button id="warp" title="Run as fast as possible">Warp</button>
+    <button id="type" title="Type text at the keyboard">Type…</button>
+    <span class="status" id="status">Connecting…</span>
+  </div>
+  <div class="stage" id="stage" tabindex="0">
+    <canvas id="screen" width="896" height="600"></canvas>
+    <div class="hint" id="hint">Click here to type on the BBC's keyboard</div>
+    <div class="offline" id="offline">
+      <div>The emulator is not running.</div>
+      <button id="start" class="on">Start the emulator</button>
+    </div>
+  </div>
+<script nonce="{{nonce}}">
+(function () {
+  const vscode = acquireVsCodeApi();
+  const canvas = document.getElementById('screen');
+  const ctx = canvas.getContext('2d');
+  const stage = document.getElementById('stage');
+  const statusEl = document.getElementById('status');
+  const hint = document.getElementById('hint');
+  const offline = document.getElementById('offline');
+  let scale = '{{scale}}';
+  let image = null;
+  let lastFrame = -1;
+  let paused = false;
+  let warp = false;
+  const held = new Set();
+
+  function layout() {
+    const w = canvas.width, h = canvas.height;
+    let s;
+    if (scale === 'fit') {
+      s = Math.min((stage.clientWidth - 8) / w, (stage.clientHeight - 8) / h);
+      s = Math.max(0.25, s);
+    } else {
+      s = Number(scale) || 1;
+    }
+    // The framebuffer has square-ish pixels already: draw it at its own aspect.
+    canvas.style.width = Math.floor(w * s) + 'px';
+    canvas.style.height = Math.floor(h * s) + 'px';
+  }
+  new ResizeObserver(layout).observe(stage);
+
+  function paint(f) {
+    if (canvas.width !== f.width || canvas.height !== f.height || !image) {
+      canvas.width = f.width;
+      canvas.height = f.height;
+      image = ctx.createImageData(f.width, f.height);
+      layout();
+    }
+    const out = image.data;
+    const px = f.pixels;
+    const n = f.width * f.height;
+    if (f.palette) {
+      const pal = f.palette;
+      for (let i = 0, o = 0; i < n; i++, o += 4) {
+        const p = px[i] * 3;
+        out[o] = pal[p]; out[o + 1] = pal[p + 1]; out[o + 2] = pal[p + 2]; out[o + 3] = 255;
+      }
+    } else {
+      for (let i = 0, o = 0, p = 0; i < n; i++, o += 4, p += 3) {
+        out[o] = px[p]; out[o + 1] = px[p + 1]; out[o + 2] = px[p + 2]; out[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(image, 0, 0);
+    lastFrame = f.frame;
+  }
+
+  window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (m.type === 'frame') {
+      paint(m);
+    } else if (m.type === 'status') {
+      statusEl.textContent = m.connected ? 'Connected' : 'Not connected';
+      offline.classList.toggle('shown', !m.connected);
+    } else if (m.type === 'scale') {
+      scale = m.scale;
+      layout();
+    }
+  });
+
+  // Keys go to the BBC by physical position (KeyboardEvent.code), which is
+  // what jsbeeb's keyboard map is keyed on: Shift is SHIFT, Backspace DELETE,
+  // End COPY, F12 BREAK, F10 f0 and so on.
+  function key(e, down) {
+    if (e.metaKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (down) {
+      if (held.has(e.code)) return; // auto-repeat: the BBC repeats keys itself
+      held.add(e.code);
+    } else {
+      held.delete(e.code);
+    }
+    vscode.postMessage({ type: 'key', code: e.code, down });
+  }
+  stage.addEventListener('keydown', (e) => key(e, true));
+  stage.addEventListener('keyup', (e) => key(e, false));
+  stage.addEventListener('focus', () => (hint.style.display = 'none'));
+  stage.addEventListener('blur', () => {
+    hint.style.display = '';
+    if (held.size) {
+      held.clear();
+      vscode.postMessage({ type: 'releaseKeys' });
+    }
+  });
+  stage.addEventListener('mousedown', () => stage.focus());
+
+  const control = (action, body) => vscode.postMessage({ type: 'control', action, body });
+  document.getElementById('pause').addEventListener('click', (e) => {
+    paused = !paused;
+    control(paused ? 'pause' : 'resume');
+    e.target.textContent = paused ? 'Resume' : 'Pause';
+  });
+  document.getElementById('break').addEventListener('click', () => control('reset', { hard: false }));
+  document.getElementById('reset').addEventListener('click', () => control('reset', { hard: true }));
+  document.getElementById('warp').addEventListener('click', (e) => {
+    warp = !warp;
+    e.target.classList.toggle('on', warp);
+    control('warp', { on: warp });
+  });
+  document.getElementById('type').addEventListener('click', () => control('type'));
+  document.getElementById('start').addEventListener('click', () => control('start'));
+})();
+</script>
+</body>
+</html>

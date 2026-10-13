@@ -1,0 +1,30 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "bbcmicro",
+      "request": "launch",
+      "name": "BBC Micro: hello",
+      "preLaunchTask": "beebasm: hello",
+      "program": "${workspaceFolder}/build/hello.ssd",
+      "debugInfo": ["${workspaceFolder}/build/hello.labels", "${workspaceFolder}/build/hello.lst"],
+      "source": "${workspaceFolder}/hello.6502"
+    },
+    {
+      "type": "bbcmicro",
+      "request": "launch",
+      "name": "BBC Micro: hello (prebuilt, stop at start)",
+      "program": "${workspaceFolder}/build/hello.ssd",
+      "debugInfo": ["${workspaceFolder}/build/hello.labels", "${workspaceFolder}/build/hello.lst"],
+      "source": "${workspaceFolder}/hello.6502",
+      "stopAt": "start"
+    },
+    {
+      "type": "bbcmicro",
+      "request": "attach",
+      "name": "BBC Micro: attach to the running machine",
+      "debugInfo": ["${workspaceFolder}/build/hello.labels", "${workspaceFolder}/build/hello.lst"],
+      "source": "${workspaceFolder}/hello.6502"
+    }
+  ]
+}

@@ -1,7 +1,8 @@
 \ hello.6502 -- a first BBC Micro program, for BeebAsm.
 \
 \ Build:  beebasm -i hello.6502 -do build/hello.ssd -boot HELLO -v -dd -labels build/hello.labels > build/hello.lst
-\ (the VS Code task "beebasm: hello" in .vscode/tasks.json does exactly this)
+\ (the VS Code task "beebasm: hello" in .vscode/tasks.json does exactly this, and
+\ F5 runs it first; build/ is checked in, so the example also runs without BeebAsm)
 
 oswrch = &FFEE
 osbyte = &FFF4
