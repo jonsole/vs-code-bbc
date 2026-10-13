@@ -84,6 +84,34 @@ sideways ROM takes the bank its code is in (`load_debug_info(bank)`, or
 `romBank` in a VS Code launch configuration), so its symbols and source
 breakpoints are that bank's alone.
 
+## Going back
+
+The machine keeps its recent past, about the last minute of emulated time,
+so an agent can go back to any instant in it exactly as it was: memory,
+registers, the screen, the disc. `step_back` goes back `"into"` the previous
+instruction, `"over"` (the default) the previous one in this routine, or
+`"out"` to the JSR that entered it, passing over interrupt handlers as `step`
+does. `reverse_continue` goes back to the last breakpoint hit or watchpoint
+access, `run_back_to` to the last time execution reached an address, and
+`run_back_to_write` to the instruction that last wrote one, before it runs:
+
+```
+set_watchpoint {address: "lives"}     # what took a life?
+run                                   # -> watch_stop: &0E05 3 -> 2 by &1F3A
+run_back_to_write {address: "lives"}  # just before the write, with its call stack
+```
+
+Each answers with `moved` (false, with a `note`, when nothing earlier
+matches), the registers, the call stack, `in_past` and `behind_cycles`.
+From the past, `step` and `run` replay what happened, keys and typing
+included; a key, a `write_memory`, `set_registers` or anything else done to
+the machine there starts a new timeline, and what came after is dropped.
+`return_to_live` replays to the newest instant. A power-on, a load, a
+`restore_state` or `load_snapshot` starts the history again, and while a tape
+is playing there is none (a moving tape is not in jsbeeb's snapshots).
+`history_status` says how much there is. VS Code's Step Back and Reverse
+Continue buttons do the same.
+
 ## Starting it
 
 Registering the server does not start it. VS Code's agent mode starts it
@@ -134,6 +162,17 @@ symbol from the program's debug info, or an expression (`table+2`). See
 | `run_for_cycles(cycles, clear?)` | Run for a number of CPU cycles (2MHz on a BBC): exact timing, to within the instruction that finishes it. Not for stepping the display (a frame is 40000 cycles interlaced, 39936 not): use run_frames. Reports cycles_run. |
 | `run_to(address, timeout_seconds?)` | Run until PC reaches an address (a one-off breakpoint), giving up after timeout_seconds of emulated time. |
 | `step(count?, mode?)` | Execute instructions and stop. mode "into" (default) runs `count` instructions; "over" runs a JSR to its return; "out" runs to the RTS of the current subroutine. An interrupt taken meanwhile is run through as if it were one instruction. |
+
+### Going back
+
+| Tool | Does |
+|---|---|
+| `step_back(mode?, count?)` | Go back through what the program did, to an instant exactly as it was: mode "into" the previous instruction executed, "over" (the default) the previous one in this routine, passing back over a subroutine just returned from, "out" the JSR that entered this routine; `count` times. Interrupt handlers are passed over. The history is about the last minute of emulated time, started again by a power-on, a load or a state put back. Forward from the past, step and run replay what happened; a key, a write_memory or set_registers there starts a new timeline. |
+| `reverse_continue()` | Go back to the last breakpoint hit, or watchpoint access, before where the machine is; with none in the history, to its start. |
+| `run_back_to(address, bank?)` | Go back to the last time execution reached an address (in &8000-&BFFF, with that sideways bank paged in if one is named). |
+| `run_back_to_write(address)` | Go back to the instruction that last wrote an address, stopped just before it runs, so one step shows the write: who wrote that? `write` says what it wrote, over what, and from where. |
+| `return_to_live()` | From the past, replay to the newest instant recorded: the present the machine left to go back. |
+| `history_status()` | How much history there is to go back through and where the machine is in it: live, behind_cycles, frames_behind, frames_available, seconds_available, checkpoints and bytes. |
 
 ### Breakpoints and watchpoints
 

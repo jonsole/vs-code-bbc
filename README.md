@@ -12,14 +12,17 @@ driven headless.
   instruction breakpoints in the disassembly view, data breakpoints (memory
   watchpoints), step in/over/out (interrupt handlers are run through, not
   stepped into), registers and flags you can edit, the 6502 stack, symbols,
-  memory view, and a call stack read off the hardware stack.
-- **MCP server:** about 50 tools for Claude Code, VS Code's agent mode, or
+  memory view, and a call stack read off the hardware stack. And backwards:
+  Step Back and Reverse Continue go back through the last minute of what
+  the machine did, exactly.
+- **MCP server:** nearly 60 tools for Claude Code, VS Code's agent mode, or
   any MCP client, modelled on [jsbeeb-mcp](https://github.com/mattgodbolt/jsbeeb-mcp)'s
   interface: run BASIC in one call, run until the prompt or for N frames and
   get back what was printed, press keys on the keyboard matrix by name or
   internal number, save and restore states, read the sound chip, plus
-  breakpoints, watchpoints, stepping, memory, registers, disassembly and
-  screenshots. A debugger window and an agent share the one machine.
+  breakpoints, watchpoints, stepping forwards and back ("who wrote that?"),
+  memory, registers, disassembly and screenshots. A debugger window and an
+  agent share the one machine.
 - **Screen panel:** the live display with the BBC's keyboard, plus BREAK,
   power cycle, pause and warp.
 - **Programs:** disc images (`.ssd`, `.dsd`, booted with SHIFT-BREAK), tapes

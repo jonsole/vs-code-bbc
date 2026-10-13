@@ -18,6 +18,9 @@
 // its checked path; the cost is a few percent, and printed text is worth it.)
 // Watchpoints use the read and write hooks the same way; a watchpoint stops
 // the CPU after the instruction that touched the memory.
+//
+// Going back: rewind.mjs keeps the recent past as checkpoints, and replays
+// from them to any instant in it; see there.
 
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
@@ -34,6 +37,7 @@ import { createSnapshot, restoreSnapshot, snapshotToJSON, snapshotFromJSON } fro
 import { encodePng } from "./png.mjs";
 import { VduTranscript } from "./vdu_transcript.mjs";
 import { fontIndex, readScreenText, VduVars } from "./screen_text.mjs";
+import { History } from "./rewind.mjs";
 
 const FbWidth = 1024;
 const FbHeight = 625;
@@ -118,6 +122,11 @@ export class Engine extends EventEmitter {
         this.breakOnInterrupt = false;
         // DAP clients connected, so a tool that resets the machine can say so.
         this.debuggers = 0;
+        // The recent past, for stepping backwards.
+        this._history = null;
+        this._nextInput = null; // in the past: the next checkpoint holding something done from outside
+        this._replaying = false; // a replay to an instant in the past, which prints nothing new
+        this._frameOffset = 0; // frames painted by replays, which the frame count leaves out
     }
 
     async init() {
@@ -138,10 +147,20 @@ export class Engine extends EventEmitter {
         this.cpu = this.session._machine.processor;
         this.machine = this.session._machine;
         this._lastFrameSeen = this.session.frameCount;
+        this._frameOffset = 0;
         // What is printed, in order, for the run tools' `output`.
         this._transcript = new VduTranscript();
-        this.machine.onVduChar((c) => this._transcript.write(c));
+        this.machine.onVduChar((c) => {
+            if (!this._replaying) this._transcript.write(c);
+        });
+        // The Master's clock reads emulated time, so a replay reads it the same.
+        if (this.cpu.cmos) {
+            const base = Date.now();
+            this.cpu.cmos.now = () => base + (this.elapsedCycles / this.model.cyclesPerSecond) * 1000;
+        }
         this._installHooks();
+        this._history = new History(this);
+        this._history.reset();
         if (wasRunning) this.resume();
     }
 
@@ -163,6 +182,8 @@ export class Engine extends EventEmitter {
         this._pendingStop = null;
         this._runDeadline = limitSeconds === undefined ? undefined : this.elapsedCycles + limitSeconds * this.model.cyclesPerSecond;
         this._runLimit = limitSeconds;
+        this._nextInput = this._history.nextInput;
+        this._updateHooks();
         // Skip the hooks for the instruction at PC: continuing from a breakpoint must not stop on it again.
         this.cpu.breakpointResume = true;
         this._lastTick = performance.now();
@@ -198,7 +219,7 @@ export class Engine extends EventEmitter {
         const cps = this.model.cyclesPerSecond;
         let cycles;
         if (this.warp || this._step?.fast) {
-            cycles = MaxSliceCycles * 4;
+            cycles = Math.min(MaxSliceCycles * 4, this._history.cyclesToCheckpoint);
         } else {
             // Fractions carried over, so a crawl at a thousandth of the speed still moves.
             this._cycleDebt += ((now - this._lastTick) / 1000) * cps * this.speedMultiplier;
@@ -214,6 +235,18 @@ export class Engine extends EventEmitter {
         const stoppedEarly = !this.cpu.execute(cycles);
         if (stoppedEarly) this.cpu.targetCycles = this.cpu.currentCycles;
         this._checkFrame();
+        if (stoppedEarly && this._pendingStop?.reason === "history-input") {
+            // Running forward through the past, to where something was done
+            // from outside: it is done again, as the checkpoint taken after it.
+            const cp = this._pendingStop.checkpoint;
+            this._pendingStop = null;
+            this._history.restore(cp);
+            this._nextInput = this._history.nextInput;
+            this._updateHooks();
+            this._schedule(0);
+            return;
+        }
+        this._history.afterSlice();
         if (stoppedEarly) {
             const stop = this._pendingStop ?? { reason: "pause", description: "Stopped" };
             if (stop.reason === "step" && this._step?.internal) stop.internal = true;
@@ -354,7 +387,7 @@ export class Engine extends EventEmitter {
 
     _updateHooks() {
         if (!this.cpu) return;
-        const wantInstr = this._bpByAddress.size > 0 || this._step !== null || this.breakOnInterrupt;
+        const wantInstr = this._bpByAddress.size > 0 || this._step !== null || this.breakOnInterrupt || this._nextInput !== null;
         const watches = [...this._watchpoints.values()];
         const wantRead = watches.some((w) => w.access !== "write");
         const wantWrite = watches.some((w) => w.access !== "read");
@@ -369,12 +402,26 @@ export class Engine extends EventEmitter {
         toggle("write", wantWrite, this.cpu.debugWrite, this._writeHook);
     }
 
+    /** Take the engine's hooks out while a replay runs, and put them back after. */
+    _suspendHooks(suspend) {
+        const hooks = { instr: [this.cpu.debugInstruction, this._instrHook], read: [this.cpu.debugRead, this._readHook], write: [this.cpu.debugWrite, this._writeHook] };
+        for (const [key, [hook, fn]] of Object.entries(hooks)) {
+            if (!this._hooksOn[key]) continue;
+            if (suspend) hook.remove(fn);
+            else hook.add(fn);
+        }
+    }
+
     setBreakOnInterrupt(on) {
         this.breakOnInterrupt = !!on;
         this._updateHooks();
     }
 
     _onInstruction(pc, opcode) {
+        if (this._nextInput && this.elapsedCycles >= this._nextInput.cycles) {
+            this._pendingStop = { reason: "history-input", checkpoint: this._nextInput };
+            return true;
+        }
         if (this.breakOnInterrupt && !this._step?.internal) {
             const irq = this._irqEntry(this.cpu);
             if (irq) {
@@ -433,7 +480,18 @@ export class Engine extends EventEmitter {
         return false;
     }
 
-    _onAccess(access, addr, val) {
+    /**
+     * The breakpoints at an address that would stop there now (bank and
+     * condition met), hit counts aside: what a search of the past asks.
+     */
+    _breakpointsHitAt(pc) {
+        const bps = this._bpByAddress.get(pc);
+        if (!bps) return [];
+        return bps.filter((bp) => !bp.logMessage && (bp.bank === undefined || bp.bank === this.bankAt(pc)) && (!bp.condition || this._safeEval(bp.compiled, bp)));
+    }
+
+    /** The watchpoint an access sets off, if any: { watchpoint, access, address, old, new }. */
+    _matchWatch(access, addr, val) {
         for (const w of this._watchpoints.values()) {
             if (w.access !== "readwrite" && w.access !== access) continue;
             if (addr < w.address || addr >= w.address + w.length) continue;
@@ -445,19 +503,28 @@ export class Engine extends EventEmitter {
             if (w.value !== undefined && val !== w.value) continue;
             if (w.notValue !== undefined && val === w.notValue) continue;
             if (w.condition && !this._safeEval(w.compiled, w, { value: val })) continue;
-            w.hits++;
-            // The instruction making the access: where it started, which jsbeeb
-            // records before running it -- PC itself has moved on into it.
-            const by = this.cpu.oldPcArray[this.cpu.oldPcIndex];
-            this._pendingStop = {
-                reason: "data breakpoint",
-                description: `${access === "read" ? "Read" : "Write"} of ${hex(val, 2)} at ${this.describeAddress(addr)} by the instruction at ${this.describeAddress(by)}`,
-                breakpointIds: [w.id],
-                watchStop: { watchpoint: w.id, access, address: addr, old, new: val, by },
-            };
-            return true;
+            return { watchpoint: w.id, access, address: addr, old, new: val };
         }
-        return false;
+        return null;
+    }
+
+    _watchStop(hit) {
+        return {
+            reason: "data breakpoint",
+            description: `${hit.access === "read" ? "Read" : "Write"} of ${hex(hit.new, 2)} at ${this.describeAddress(hit.address)} by the instruction at ${this.describeAddress(hit.by)}`,
+            breakpointIds: [hit.watchpoint],
+            watchStop: { watchpoint: hit.watchpoint, access: hit.access, address: hit.address, old: hit.old, new: hit.new, by: hit.by },
+        };
+    }
+
+    _onAccess(access, addr, val) {
+        const hit = this._matchWatch(access, addr, val);
+        if (!hit) return false;
+        this._watchpoints.get(hit.watchpoint).hits++;
+        // The instruction making the access: where it started, which jsbeeb
+        // records before running it -- PC itself has moved on into it.
+        this._pendingStop = this._watchStop({ ...hit, by: this.cpu.oldPcArray[this.cpu.oldPcIndex] });
+        return true;
     }
 
     _safeEval(compiled, owner, extra) {
@@ -645,6 +712,7 @@ export class Engine extends EventEmitter {
         else if (n === "p") c.p.setFromByte(value & 0xff);
         else if (n.length === 1 && "czidvn".includes(n)) c.p[n] = !!value;
         else throw new Error(`No register "${name}"`);
+        this._mutated();
     }
 
     flagsString(p = this.cpu.p.asByte()) {
@@ -684,6 +752,7 @@ export class Engine extends EventEmitter {
         } finally {
             if (hooked) this.cpu.debugWrite.add(this._writeHook);
         }
+        this._mutated();
     }
 
     /** What is paged in: romsel (the sideways bank at &8000), and on a Master acccon (bit 2: shadow RAM at &3000). */
@@ -802,7 +871,13 @@ export class Engine extends EventEmitter {
         return () => this._frameListeners.delete(listener);
     }
 
+    /** Frames painted, as the machine's own history has them: a replay of the past does not add to it. */
     get frameCount() {
+        return this.session.frameCount - this._frameOffset;
+    }
+
+    /** Frames painted, replays included: what a picture listener counts. */
+    get paintCount() {
         return this.session.frameCount;
     }
 
@@ -873,20 +948,24 @@ export class Engine extends EventEmitter {
         // BREAK is not in the keyboard matrix: it pulls the reset line, as F12 does in jsbeeb's page.
         if (code === BreakKey) {
             this.session.reset(false);
+            this._mutated();
             this.emit("reset");
             return;
         }
         this.machine.keyDown(code);
+        this._mutated();
     }
 
     keyUp(key) {
         this._cancelTypingForKeys();
         const code = resolveKeyCode(key);
         if (code !== BreakKey) this.machine.keyUp(code);
+        this._mutated();
     }
 
     releaseAllKeys() {
         this.session.releaseAllKeys();
+        this._mutated();
     }
 
     /** The model's own key names and matrix positions: jsbeeb's BBC table, or the Atom's. */
@@ -906,6 +985,7 @@ export class Engine extends EventEmitter {
         if (typeof selector.key === "string" && selector.key.toUpperCase() === "BREAK") {
             if (down) {
                 this.session.reset(false);
+                this._mutated();
                 this.emit("reset");
             }
             return [{ name: "BREAK" }];
@@ -917,6 +997,7 @@ export class Engine extends EventEmitter {
         const before = new Set(this.session.heldKeys().map(String));
         if (down) this.session.keyDownRaw(colRow);
         else this.session.keyUpRaw(colRow);
+        this._mutated();
         const after = this.session.heldKeys();
         const afterSet = new Set(after.map(String));
         const changed = down ? after.filter((k) => !before.has(String(k))) : [...before].filter((k) => !afterSet.has(k)).map((k) => k.split(",").map(Number));
@@ -964,7 +1045,10 @@ export class Engine extends EventEmitter {
     /** Drop whatever is still to be typed; true if there was any. */
     cancelTyping() {
         const was = this.typing;
-        if (was) this.machine.typist.cancel();
+        if (was) {
+            this.machine.typist.cancel();
+            this._mutated();
+        }
         return was;
     }
 
@@ -976,10 +1060,146 @@ export class Engine extends EventEmitter {
     type(text, { enter = true } = {}) {
         const lines = text.replace(/\r\n?/g, "\n");
         this.machine.typist.type(this.model.stringToKeys(enter ? lines + "\n" : lines), true);
+        this._mutated();
     }
 
     get typing() {
         return this.machine.typist.isTyping;
+    }
+
+    // -----------------------------------------------------------------------
+    // Going back (see rewind.mjs)
+
+    /** Something was done to the machine from outside: the history keeps it. */
+    _mutated() {
+        if (!this._history || this._replaying) return;
+        this._history.mutated();
+        this._nextInput = this.running ? this._history.nextInput : null;
+        this._updateHooks();
+    }
+
+    get history() {
+        return this._history;
+    }
+
+    _goBack(kind, scan, opts) {
+        if (this.running) this.pause(undefined, { internal: true });
+        const before = this.elapsedCycles;
+        const found = this._history.searchBack(scan, opts);
+        this._checkFrame();
+        return { moved: this.elapsedCycles !== before, found };
+    }
+
+    /**
+     * Back `count` instructions: "into" each instruction, "over" the calls
+     * returned from (staying in this routine), or "out" to the JSR that
+     * entered it. Interrupt handlers are passed over, as forward steps pass
+     * them. Returns { moved, steps, note }.
+     */
+    stepBack(mode = "over", count = 1) {
+        if (!["into", "over", "out"].includes(mode)) throw new Error('mode is "into", "over" or "out"');
+        let left = Math.max(1, count | 0);
+        let steps = 0;
+        let ref = null;
+        let lastFound;
+        const accept = {
+            into: (seg, j) => seg.irq[j] <= ref.irq,
+            over: (seg, j) => seg.irq[j] <= ref.irq && seg.depth[j] <= ref.depth,
+            out: (seg, j) => seg.irq[j] <= ref.irq && seg.depth[j] < ref.depth,
+        }[mode];
+        const { moved } = this._goBack(`Step back ${mode}`, (seg, oldest) => {
+            const last = seg.cycles.length - 1;
+            // Depths count from each stretch's start; carry the reference back across.
+            ref = ref === null ? { depth: seg.depth[last], irq: seg.irq[last] } : { depth: ref.depth + seg.depth[last], irq: ref.irq + seg.irq[last] };
+            for (let j = last - 1; j >= 0; j--) {
+                if (!accept(seg, j)) continue;
+                steps++;
+                lastFound = seg.cycles[j];
+                ref = { depth: seg.depth[j], irq: seg.irq[j] };
+                if (--left === 0) return lastFound;
+            }
+            return oldest ? lastFound : undefined;
+        });
+        const result = { moved, steps };
+        if (steps < count) result.note = steps === 0 ? (mode === "out" ? "No call to go back out of in the history" : "At the start of the history") : `Reached the start of the history after ${steps}`;
+        this._stopped({ reason: "step", description: `Step back ${mode}` });
+        return result;
+    }
+
+    /** Back to the last breakpoint hit or watchpoint access before here, or the start of the history. */
+    reverseContinue() {
+        let hit;
+        const { moved } = this._goBack(
+            "Reverse continue",
+            (seg, oldest) => {
+                for (let j = seg.hits.length - 1; j >= 0; j--) {
+                    const h = seg.hits[j];
+                    if (h.cycles < seg.end) {
+                        hit = h;
+                        return h.cycles;
+                    }
+                }
+                return oldest ? this._history.start : undefined;
+            },
+            { watches: this._watchpoints.size > 0 },
+        );
+        if (hit?.kind === "breakpoint") {
+            this._stopped({ reason: "breakpoint", description: `Breakpoint at ${this.describeAddress(hit.pc)} (going back)`, breakpointIds: hit.bps.map((b) => b.id) });
+        } else if (hit) {
+            this._stopped(this._watchStop(hit));
+        } else {
+            this._stopped({ reason: "step", description: "Back at the start of the history" });
+        }
+        const result = { moved, hit: !!hit };
+        if (!hit) result.note = "No breakpoint or watchpoint was hit in the history: this is its start";
+        return result;
+    }
+
+    /** Back to the last time execution reached an address (in a bank, for &8000-&BFFF). */
+    runBackTo(address, { bank } = {}) {
+        address &= 0xffff;
+        if (!isBanked(address)) bank = undefined;
+        const { moved, found } = this._goBack(`Run back to ${hex(address)}`, (seg) => {
+            for (let j = seg.cycles.length - 2; j >= 0; j--) if (seg.pc[j] === address && (bank === undefined || seg.bank[j] === bank)) return seg.cycles[j];
+            return undefined;
+        }, { banks: bank !== undefined });
+        this._stopped({ reason: "step", description: found !== undefined ? `Back at ${this.describeAddress(address)}` : "Run back" });
+        return found !== undefined ? { moved } : { moved, note: `${this.describeAddress(address, bank)} was not reached in the history` };
+    }
+
+    /** Back to the instruction that last wrote an address, before it runs. */
+    runBackToWrite(address) {
+        address &= 0xffff;
+        let hit;
+        const { moved } = this._goBack(
+            `Run back to the write of ${hex(address)}`,
+            (seg) => {
+                for (let j = seg.hits.length - 1; j >= 0; j--) {
+                    if (seg.hits[j].kind === "write" && seg.hits[j].cycles < seg.end) {
+                        hit = seg.hits[j];
+                        return hit.cycles;
+                    }
+                }
+                return undefined;
+            },
+            { writes: address },
+        );
+        if (hit) {
+            this._stopped({ reason: "step", description: `Before the write of ${hex(hit.new, 2)} to ${this.describeAddress(address)}` });
+            return { moved, write: { address: hit.address, old: hit.old, new: hit.new, by: hit.by } };
+        }
+        this._stopped({ reason: "step", description: "Run back" });
+        return { moved, note: `Nothing wrote ${this.describeAddress(address)} in the history` };
+    }
+
+    /** From the past, replay to the newest instant. */
+    returnToLive() {
+        if (this.running) this.pause(undefined, { internal: true });
+        const moved = this._history.inPast;
+        if (moved) this._history.seek(this._history.head);
+        this._checkFrame();
+        this._stopped({ reason: "step", description: "Back to the present" });
+        return { moved };
     }
 
     // -----------------------------------------------------------------------
@@ -992,6 +1212,9 @@ export class Engine extends EventEmitter {
             await this._create(model ?? this.modelName, { tube: tube ?? this.tube });
         } else {
             this.session.reset(hard);
+            // The history starts again at a power-on; a BREAK is a step in it.
+            if (hard) this._history.reset();
+            else this._mutated();
         }
         this.emit("reset");
     }
@@ -1028,7 +1251,7 @@ export class Engine extends EventEmitter {
      * picture. Resolves to null, or the stop if something else came first.
      */
     async runFrames(count, { limitSeconds } = {}) {
-        const target = this.frameCount + Math.max(1, count | 0);
+        const target = this.session.frameCount + Math.max(1, count | 0);
         this._startStep({
             kind: `Run ${count} frame${count === 1 ? "" : "s"}`,
             done: () => this.session.frameCount >= target,
@@ -1078,6 +1301,7 @@ export class Engine extends EventEmitter {
         const data = new Uint8Array(fs.readFileSync(file));
         this.session._machine.processor.fdc.loadDisc(drive, discFor(file, data));
         this.programPath = file;
+        this._mutated();
     }
 
     /**
@@ -1090,12 +1314,14 @@ export class Engine extends EventEmitter {
         const isRef = /^(sth|hfe|bitshifters|https?|file):/i.test(ref);
         const result = await this.session.loadDiscImage(isRef ? ref : pathToFileURL(path.resolve(ref)).href, drive);
         if (drive === 0) this.programPath = ref;
+        this._mutated();
         return result;
     }
 
     async loadTape(file) {
         await this.session.loadTape(file);
         this.programPath = file;
+        this._mutated();
     }
 
     /** What is paged: romsel (the sideways bank at &8000), and on a Master acccon. */
@@ -1108,6 +1334,7 @@ export class Engine extends EventEmitter {
             if (!this.model.isMaster) throw new Error("Only a Master has ACCCON");
             this.cpu.writeAcccon(acccon & 0xff);
         }
+        this._mutated();
         return this.paging();
     }
 
@@ -1119,6 +1346,7 @@ export class Engine extends EventEmitter {
         if (!Number.isInteger(bank) || bank < 0 || bank > 15) throw new Error("bank is a sideways bank, 0-15");
         if (data.length > 16384) throw new Error(`A sideways ROM is at most 16K; this is ${data.length} bytes`);
         this.machine.loadSidewaysRam(bank, data);
+        this._mutated();
     }
 
     /** The cassette recorder: "play", "stop", "rewind", "eject", or "status". */
@@ -1144,6 +1372,7 @@ export class Engine extends EventEmitter {
             default:
                 throw new Error('action is "play", "stop", "rewind", "eject" or "status"');
         }
+        if (action !== "status") this._mutated();
         const tape = t.tape;
         return {
             tape: tape ? (tape.name ? path.basename(tape.name) : "inserted") : null,
@@ -1156,6 +1385,7 @@ export class Engine extends EventEmitter {
 
     async loadBasic(source) {
         await this.session.loadBasic(source);
+        this._mutated();
     }
 
     loadBinary(file, address) {
@@ -1169,6 +1399,7 @@ export class Engine extends EventEmitter {
     /** Put back a state from session.snapshot(); breakpoints and the frame counter carry on. */
     restore(state) {
         this.session.restore(state);
+        this._history.reset();
         this.emit("reset");
     }
 
@@ -1190,6 +1421,7 @@ export class Engine extends EventEmitter {
         if (findModel(snap.model).name !== this.model.name) await this._create(snap.model);
         restoreSnapshot(this.cpu, this.model, snap);
         this.programPath = snap.media?.program ?? null;
+        this._history.reset();
         this.emit("reset");
         return snap.model;
     }
@@ -1231,6 +1463,8 @@ export class Engine extends EventEmitter {
             watchpoints: this.watchpoints().map((w) => ({ ...w, address: hex(w.address) })),
             callStack: this.callStack().map((f) => this.describeAddress(f.pc)),
             program: this.programPath,
+            in_past: this._history.inPast,
+            behind_cycles: this._history.behindCycles,
         };
     }
 

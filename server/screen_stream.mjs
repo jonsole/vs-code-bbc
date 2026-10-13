@@ -99,7 +99,7 @@ export function serveStream(engine, req, res, { fps = 50 } = {}) {
     const send = (force = false) => {
         const now = performance.now();
         if (!force && (now - last < minGap || res.writableNeedDrain)) return;
-        const n = engine.frameCount;
+        const n = engine.paintCount;
         if (!force && n === lastFrame) return;
         last = now;
         lastFrame = n;

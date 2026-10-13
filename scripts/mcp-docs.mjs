@@ -14,6 +14,7 @@ const Groups = [
     ["The machine", ["server_info", "get_state", "reset", "set_speed"]],
     ["Loading", ["load_program", "load_disc", "load_basic", "run_basic", "load_rom", "tape_control"]],
     ["Running", ["run", "pause", "run_until_prompt", "run_frames", "run_for_cycles", "run_to", "step"]],
+    ["Going back", ["step_back", "reverse_continue", "run_back_to", "run_back_to_write", "return_to_live", "history_status"]],
     ["Breakpoints and watchpoints", ["set_breakpoint", "clear_breakpoint", "list_breakpoints", "set_watchpoint", "clear_watchpoint", "list_watchpoints", "set_break_on_interrupt", "get_log"]],
     ["Memory and the CPU", ["read_memory", "write_memory", "save_memory", "set_paging", "get_registers", "set_registers", "disassemble", "evaluate"]],
     ["The screen", ["get_screen", "get_screen_text"]],

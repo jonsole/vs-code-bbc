@@ -105,6 +105,24 @@ const RunReportSchema = {
     },
     required: ["registers"],
 };
+const BackSchema = {
+    type: "object",
+    properties: {
+        moved: { type: "boolean" },
+        steps: { type: "integer", description: "How many of count it managed" },
+        note: { type: "string", description: "Why it did not go as far as asked" },
+        stopped_reason: { type: "string" },
+        stopped: { type: "string" },
+        breakpoint_ids: { type: "array", items: { type: "integer" } },
+        watch_stop: { type: "object" },
+        write: { type: "object", description: "run_back_to_write: the write about to happen" },
+        registers: RegistersSchema,
+        call_stack: { type: "array", items: { type: "string" } },
+        in_past: { type: "boolean" },
+        behind_cycles: { type: "integer" },
+    },
+    required: ["moved", "registers", "in_past"],
+};
 const StateSchema = {
     type: "object",
     properties: { state_id: { type: "string" }, model: { type: "string" }, label: { type: "string" }, registers: RegistersSchema, at: { type: "string" } },
@@ -116,6 +134,7 @@ const StateSchema = {
 const Moving = new Set([
     "reset", "load_program", "run_basic", "run", "pause", "run_until_prompt", "run_frames", "run_for_cycles", "run_to", "step",
     "type_text", "press_key", "restore_state", "load_snapshot", "get_screen",
+    "step_back", "reverse_continue", "run_back_to", "run_back_to_write", "return_to_live",
 ]);
 // Tools that reset or replace the machine: worth a warning when a person is debugging it.
 const Resetting = new Set(["reset", "load_program", "run_basic", "restore_state", "load_snapshot"]);
@@ -206,6 +225,33 @@ export function makeTools(engine, serverInfo) {
         return stop.reason === "pause" ? "paused" : stop.reason;
     };
 
+    const watchStopReport = (w) => ({
+        watchpoint: w.watchpoint,
+        access: w.access,
+        address: engine.describeAddress(w.address),
+        old: hex(w.old, 2),
+        new: hex(w.new, 2),
+        by: engine.describeAddress(w.by),
+    });
+
+    /** What the tools that go back report: whether it moved, where to, and how far behind the present that is. */
+    const backResult = (r) => {
+        const stop = engine.lastStop;
+        const result = { moved: r.moved };
+        if (r.steps !== undefined) result.steps = r.steps;
+        if (r.note) result.note = r.note;
+        result.stopped_reason = stoppedReason(stop);
+        result.stopped = stop.description;
+        if (stop.breakpointIds?.length) result.breakpoint_ids = stop.breakpointIds;
+        if (stop.watchStop) result.watch_stop = watchStopReport(stop.watchStop);
+        if (r.write) result.write = { address: engine.describeAddress(r.write.address), old: hex(r.write.old, 2), new: hex(r.write.new, 2), by: engine.describeAddress(r.write.by) };
+        result.registers = engine.registerReport();
+        result.call_stack = engine.callStack().map((f) => engine.describeAddress(f.pc));
+        result.in_past = engine.history.inPast;
+        result.behind_cycles = engine.history.behindCycles;
+        return result;
+    };
+
     /**
      * What every tool that runs the machine and waits reports: whether it got
      * where it was going, why it stopped if not, where the CPU is, how far it
@@ -217,17 +263,7 @@ export function makeTools(engine, serverInfo) {
             result.stopped_reason = stoppedReason(stop);
             result.stopped = stop.description;
             if (stop.breakpointIds?.length) result.breakpoint_ids = stop.breakpointIds;
-            if (stop.watchStop) {
-                const w = stop.watchStop;
-                result.watch_stop = {
-                    watchpoint: w.watchpoint,
-                    access: w.access,
-                    address: engine.describeAddress(w.address),
-                    old: hex(w.old, 2),
-                    new: hex(w.new, 2),
-                    by: engine.describeAddress(w.by),
-                };
-            }
+            if (stop.watchStop) result.watch_stop = watchStopReport(stop.watchStop);
         }
         if (startCycles !== undefined) result.cycles_run = engine.elapsedCycles - startCycles;
         if (startFrame !== undefined) result.frames_run = engine.frameCount - startFrame;
@@ -444,6 +480,52 @@ export function makeTools(engine, serverInfo) {
                 }
                 return runResult(stop.reason === "step" && !stop.timedOut ? null : stop, { startCycles, clear: false });
             },
+        },
+
+        // --- going back ------------------------------------------------------
+        step_back: {
+            description:
+                'Go back through what the program did, to an instant exactly as it was: mode "into" the previous instruction executed, "over" ' +
+                "(the default) the previous one in this routine, passing back over a subroutine just returned from, \"out\" the JSR that entered " +
+                "this routine; `count` times. Interrupt handlers are passed over. The history is about the last minute of emulated time, started " +
+                "again by a power-on, a load or a state put back. Forward from the past, step and run replay what happened; a key, a write_memory " +
+                "or set_registers there starts a new timeline.",
+            inputSchema: { type: "object", properties: { mode: { type: "string", enum: ["into", "over", "out"] }, count: { type: "integer", minimum: 1 } } },
+            outputSchema: BackSchema,
+            run: (a) => backResult(engine.stepBack(a.mode ?? "over", a.count ?? 1)),
+        },
+        reverse_continue: {
+            description: "Go back to the last breakpoint hit, or watchpoint access, before where the machine is; with none in the history, to its start.",
+            outputSchema: BackSchema,
+            run: () => backResult(engine.reverseContinue()),
+        },
+        run_back_to: {
+            description: "Go back to the last time execution reached an address (in &8000-&BFFF, with that sideways bank paged in if one is named).",
+            inputSchema: { type: "object", properties: { address: addressParam, bank: bankParam }, required: ["address"] },
+            outputSchema: BackSchema,
+            run: (a) => {
+                const { address, bank } = banked(a);
+                return backResult(engine.runBackTo(address, { bank }));
+            },
+        },
+        run_back_to_write: {
+            description:
+                "Go back to the instruction that last wrote an address, stopped just before it runs, so one step shows the write: who wrote that? " +
+                "`write` says what it wrote, over what, and from where.",
+            inputSchema: { type: "object", properties: { address: addressParam }, required: ["address"] },
+            outputSchema: BackSchema,
+            run: (a) => backResult(engine.runBackToWrite(addr(a.address))),
+        },
+        return_to_live: {
+            description: "From the past, replay to the newest instant recorded: the present the machine left to go back.",
+            outputSchema: BackSchema,
+            run: () => backResult(engine.returnToLive()),
+        },
+        history_status: {
+            description:
+                "How much history there is to go back through and where the machine is in it: live, behind_cycles, frames_behind, frames_available, " +
+                "seconds_available, checkpoints and bytes.",
+            run: () => engine.history.status(),
         },
 
         set_speed: {

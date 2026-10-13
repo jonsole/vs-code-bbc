@@ -207,6 +207,7 @@ export class DapSession {
             supportsRestartRequest: true,
             supportsValueFormattingOptions: false,
             supportsRunToLocation: false,
+            supportsStepBack: true,
             breakpointModes: [],
         };
     }
@@ -432,6 +433,27 @@ export class DapSession {
         this.engine.stepOut();
     }
 
+    // Going back is answered first; the stop where it lands follows as a
+    // stopped event, as a step's does.
+    on_stepBack() {
+        this._goBack(() => this.engine.stepBack("over", 1));
+    }
+
+    on_reverseContinue() {
+        this._goBack(() => this.engine.reverseContinue());
+    }
+
+    _goBack(fn) {
+        setImmediate(() => {
+            try {
+                fn();
+            } catch (e) {
+                this.event("output", { category: "stderr", output: `${e.message}\n` });
+                this._sendStopped({ reason: "step", description: e.message });
+            }
+        });
+    }
+
     // -- state ---------------------------------------------------------------
 
     _source(file) {
@@ -622,4 +644,4 @@ export class DapSession {
 
 const NoResponse = Symbol("NoResponse");
 // The requests that set the machine moving: their stops are the debugger's own.
-const Moving = new Set(["launch", "attach", "restart", "continue", "next", "stepIn", "stepOut", "pause"]);
+const Moving = new Set(["launch", "attach", "restart", "continue", "next", "stepIn", "stepOut", "pause", "stepBack", "reverseContinue"]);

@@ -41,6 +41,8 @@ BeebAsm. If you change `hello.6502`, rebuild it with the command at its top.
 | Path | What |
 |---|---|
 | `server/engine.mjs` | The one live machine: the real-time run loop, stepping, breakpoints, watchpoints, logpoints, call stack, screen, keys, snapshots |
+| `server/rewind.mjs` | The recent past: checkpoints, replay to an exact cycle, and the searches stepping backwards makes |
+| `server/vdu_transcript.mjs`, `server/screen_text.mjs` | What was printed, and what the screen says now |
 | `server/program.mjs` | Loading a disc, tape, BASIC or binary and starting it (shared by DAP launch and MCP `load_program`) |
 | `server/dap.mjs` | The Debug Adapter Protocol over TCP |
 | `server/mcp.mjs` | The MCP tools; every tool is declared here only |
@@ -69,6 +71,15 @@ BeebAsm. If you change `hello.6502`, rebuild it with the command at its top.
   Engine treats it so.
 - **jsbeeb logs with `console.log`.** The server sends it to stderr, because
   stdout carries the one readiness line the extension waits for.
+- **Anything done to the machine from outside goes through the Engine and
+  calls `_mutated()`**, which checkpoints it into the history: that is how
+  the past replays it, and how doing it in the past starts a new timeline.
+  A new way to change the machine that skips it makes the past replay wrong.
+  Anything that moves the cycle count backwards (a restore) resets the
+  history instead.
+- **Replay relies on jsbeeb being deterministic**: no `Math.random` or wall
+  clock in a BBC's run (the Master's clock is pointed at emulated time),
+  and the keyboard and typist, which snapshots leave out, saved beside them.
 - A program started by SHIFT-BREAK can finish before the SHIFT key is
   released, so a launch's `stopAt` is a breakpoint from the moment the
   program is loaded, not something run to afterwards.

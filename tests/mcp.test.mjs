@@ -329,3 +329,68 @@ test("MCP: sideways banks: breakpoints, watchpoints and symbols for one bank", a
     await assert.rejects(tool(server, "set_breakpoint", { address: "4:&2000" }), /Only &8000-&BFFF is banked/);
     await assert.rejects(tool(server, "set_breakpoint", { address: "&8100", bank: 16 }), /0-15/);
 });
+
+test("MCP and DAP: going back", async (t) => {
+    const server = await startServer();
+    const dap = new DapClient(server.dapPort);
+    t.after(async () => {
+        dap.close();
+        await server.stop();
+    });
+    await tool(server, "run_until_prompt");
+    await tool(server, "pause");
+    // LDX #0 / loop: INX / JSR sub / JMP loop;  sub: STX &70 / LDA #1 / RTS
+    await tool(server, "write_memory", { address: "&2000", data: "A2 00 E8 20 00 30 4C 02 20" });
+    await tool(server, "write_memory", { address: "&3000", data: "86 70 A9 01 60" });
+    await tool(server, "set_registers", { pc: "&2000" });
+    await tool(server, "run_for_cycles", { cycles: 1500000 });
+    await tool(server, "run_to", { address: "&3002" });
+    const x = parseInt((await tool(server, "get_registers")).x.slice(1), 16);
+
+    let back = await tool(server, "step_back", { mode: "into", count: 2 }); // STX, JSR
+    assert.equal(back.moved, true);
+    assert.equal(back.steps, 2);
+    assert.equal(back.registers.pc, "&2003");
+    assert.equal(back.in_past, true);
+    assert.ok(back.behind_cycles > 0);
+
+    back = await tool(server, "run_back_to_write", { address: "&70" });
+    assert.equal(back.write.by, "&3000");
+    assert.equal(back.write.new, `&${((x - 1) & 0xff).toString(16).toUpperCase().padStart(2, "0")}`);
+
+    await tool(server, "set_watchpoint", { address: "&70" });
+    back = await tool(server, "reverse_continue");
+    assert.equal(back.stopped_reason, "watchpoint");
+    assert.equal(back.watch_stop.by, "&3000");
+    await tool(server, "clear_watchpoint", {});
+
+    back = await tool(server, "run_back_to", { address: "&8000", bank: 5 });
+    assert.equal(back.moved, false);
+    assert.match(back.note, /not reached/);
+
+    const status = await tool(server, "history_status");
+    assert.equal(status.live, false);
+    assert.ok(status.checkpoints > 1 && status.seconds_available > 0.5);
+    assert.equal((await tool(server, "get_state")).in_past, true);
+
+    back = await tool(server, "return_to_live");
+    assert.equal(back.in_past, false);
+    assert.equal(back.registers.pc, "&3002");
+    assert.equal(back.registers.x, `&${x.toString(16).toUpperCase().padStart(2, "0")}`);
+
+    // VS Code steps back too.
+    await dap.connect();
+    const caps = await dap.request("initialize", { adapterID: "bbcmicro" });
+    assert.equal(caps.supportsStepBack, true);
+    const attached = dap.request("attach", {});
+    await dap.waitFor("initialized", { since: 0 });
+    await dap.request("configurationDone");
+    await attached;
+    await dap.waitFor("stopped", { since: 0 });
+    const since = dap.events.length;
+    await dap.request("stepBack", { threadId: 1 });
+    await dap.waitFor("stopped", { since });
+    const top = (await dap.request("stackTrace", { threadId: 1 })).stackFrames[0];
+    assert.equal(top.instructionPointerReference, "0x3000");
+    await dap.request("disconnect", {});
+});
