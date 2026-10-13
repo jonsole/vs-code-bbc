@@ -134,6 +134,17 @@ export function makeTools(engine, serverInfo) {
             result.stopped_reason = stoppedReason(stop);
             result.stopped = stop.description;
             if (stop.breakpointIds?.length) result.breakpoint_ids = stop.breakpointIds;
+            if (stop.watchStop) {
+                const w = stop.watchStop;
+                result.watch_stop = {
+                    watchpoint: w.watchpoint,
+                    access: w.access,
+                    address: engine.describeAddress(w.address),
+                    old: hex(w.old, 2),
+                    new: hex(w.new, 2),
+                    by: engine.describeAddress(w.by),
+                };
+            }
         }
         if (startCycles !== undefined) result.cycles_run = engine.elapsedCycles - startCycles;
         if (startFrame !== undefined) result.frames_run = engine.frameCount - startFrame;
@@ -247,16 +258,6 @@ export function makeTools(engine, serverInfo) {
                 return { disc: name, drive: a.drive ?? 0, ignored };
             },
         },
-        boot_disc: {
-            description: "Load a disc (as load_disc takes it) into drive 0 and boot it with SHIFT-BREAK, keeping the model. Leaves the machine running; reports shift_held_at_reset.",
-            inputSchema: { type: "object", properties: { image: { type: "string" } }, required: ["image"] },
-            run: async (a) => {
-                engine.pause("Booting a disc", { internal: true });
-                const { name, ignored } = await engine.loadDiscRef(a.image, 0);
-                const booted = await tools.reset.run({ autoboot: true, hard: true });
-                return { disc: name, ignored, shift_held_at_reset: booted.shift_held_at_reset, cancelled_typing: booted.cancelled_typing };
-            },
-        },
         load_basic: {
             description: "Tokenise BBC BASIC source and put it at PAGE, as if typed in. Does not run it: type_text RUN, then run_until_prompt.",
             inputSchema: { type: "object", properties: { source: { type: "string" } }, required: ["source"] },
@@ -291,14 +292,21 @@ export function makeTools(engine, serverInfo) {
 
         // --- running -------------------------------------------------------
         run: {
-            description: "Let the machine run on in real time, as the screen panel shows it, until a breakpoint, a watchpoint or pause. With wait_ms, wait that long for it to stop and report how.",
-            inputSchema: { type: "object", properties: { wait_ms: { type: "integer" } } },
+            description:
+                "Let the machine run on in real time, as the screen panel shows it, until a breakpoint, a watchpoint or pause, and report " +
+                "how it stopped -- or after timeout_secs of emulated time (default 30), stopped_reason \"timeout\", so a breakpoint that " +
+                "is never hit cannot hang the call. wait: false starts it and returns at once, to leave a game running.",
+            inputSchema: { type: "object", properties: { wait: { type: "boolean" }, timeout_secs: { type: "number", minimum: 0.01 } } },
             run: async (a) => {
-                engine.resume();
-                if (!(a.wait_ms > 0)) return { running: true };
-                const stop = await engine.waitForStop(a.wait_ms);
-                if (!stop) return { running: engine.running };
-                return runResult(stop, { clear: false });
+                if (a.wait === false) {
+                    engine.resume();
+                    return { running: engine.running, registers: engine.registerReport() };
+                }
+                const startCycles = engine.elapsedCycles;
+                const startFrame = engine.frameCount;
+                engine.resume({ limitSeconds: a.timeout_secs ?? 30 });
+                const stop = await engine.waitForStop();
+                return runResult(stop, { startCycles, startFrame });
             },
         },
         pause: {
@@ -357,13 +365,12 @@ export function makeTools(engine, serverInfo) {
         set_breakpoint: {
             description:
                 'Stop when execution reaches an address. condition is an expression ("A=&41", "?&70>3", "X<>0 AND C"); hit_count waits for the nth ' +
-                "hit; log_message makes a logpoint that records a message ({expressions} in braces) instead of stopping. type read or write makes it a " +
-                "watchpoint on that address instead, as set_watchpoint does.",
+                "hit; log_message makes a logpoint that records a message ({expressions} in braces) instead of stopping. To stop on a read or write " +
+                "of memory, set_watchpoint.",
             inputSchema: {
                 type: "object",
                 properties: {
                     address: addressParam,
-                    type: { type: "string", enum: ["execute", "read", "write"] },
                     condition: { type: "string" },
                     hit_count: { type: "string", description: 'e.g. "3" (from the 3rd hit), "==5", "%10"' },
                     log_message: { type: "string" },
@@ -371,7 +378,6 @@ export function makeTools(engine, serverInfo) {
                 required: ["address"],
             },
             run: (a) => {
-                if (a.type === "read" || a.type === "write") return tools.set_watchpoint.run({ address: a.address, access: a.type, condition: a.condition });
                 const existing = engine.breakpoints(McpOwner).map(({ id, address, condition, hitCondition, logMessage, kind }) => ({ id, address, condition, hitCondition, logMessage, kind }));
                 const address = addr(a.address);
                 const list = engine.setBreakpoints(McpOwner, [
@@ -403,20 +409,36 @@ export function makeTools(engine, serverInfo) {
                     .map((b) => ({ id: b.id, owner: b.owner, address: engine.describeAddress(b.address), condition: b.condition, hit_count: b.hitCondition, log_message: b.logMessage, hits: b.hits })),
         },
         set_watchpoint: {
-            description: "Stop when the program reads or writes memory in a range: what changed this? The machine stops after the instruction that did it. condition can test `value`, the byte read or written.",
+            description:
+                "Stop when the program reads or writes memory in a range: what changed this? By default only a write that CHANGES the " +
+                "value stops it (on_change false: every write). value / not_value: only an access of, or not of, that byte; condition: any " +
+                "expression, with `value` the byte. The stop comes after the instruction that did it, and the run report's watch_stop says " +
+                "the address, the old and new values and the instruction.",
             inputSchema: {
                 type: "object",
                 properties: {
                     address: addressParam,
-                    length: { type: "integer", minimum: 1 },
+                    length: { type: "integer", minimum: 1, description: "Bytes covered from address (default 1): a whole record in one watchpoint" },
                     access: { type: "string", enum: ["write", "read", "readwrite"] },
-                    condition: { type: "string", description: 'e.g. "value=0" or "value>&7F"' },
+                    on_change: { type: "boolean", description: "Only a write that changes the value (default true)" },
+                    value: { type: "integer", minimum: 0, maximum: 255 },
+                    not_value: { type: "integer", minimum: 0, maximum: 255 },
+                    condition: { type: "string", description: 'e.g. "value>&7F" or "?counter=3"' },
                 },
                 required: ["address"],
             },
             run: (a) => {
-                const w = engine.addWatchpoint({ owner: McpOwner, address: addr(a.address), length: a.length ?? 1, access: a.access ?? "write", condition: a.condition });
-                return { id: w.id, watching: `${w.length} byte(s) at ${engine.describeAddress(w.address)} for ${w.access}` };
+                const w = engine.addWatchpoint({
+                    owner: McpOwner,
+                    address: addr(a.address),
+                    length: a.length ?? 1,
+                    access: a.access ?? "write",
+                    condition: a.condition,
+                    onChange: a.on_change !== false,
+                    value: a.value,
+                    notValue: a.not_value,
+                });
+                return { id: w.id, watching: `${w.length} byte(s) at ${engine.describeAddress(w.address)} for ${w.access}`, on_change: w.onChange };
             },
         },
         clear_watchpoint: {
@@ -430,7 +452,19 @@ export function makeTools(engine, serverInfo) {
         },
         list_watchpoints: {
             description: "Every watchpoint, with hit counts.",
-            run: () => engine.watchpoints().map((w) => ({ ...w, address: engine.describeAddress(w.address) })),
+            run: () =>
+                engine.watchpoints().map((w) => ({
+                    id: w.id,
+                    owner: w.owner,
+                    address: engine.describeAddress(w.address),
+                    length: w.length,
+                    access: w.access,
+                    on_change: w.onChange,
+                    value: w.value,
+                    not_value: w.notValue,
+                    condition: w.condition,
+                    hits: w.hits,
+                })),
         },
         get_log: {
             description: "What logpoints have reported, after sequence number `since`.",
@@ -522,15 +556,40 @@ export function makeTools(engine, serverInfo) {
         // --- the screen ----------------------------------------------------
         get_screen: {
             description:
-                "A screenshot of the last complete frame, as a PNG, with frame_count so a new picture can be told from the same one twice. " +
-                "scale 2 doubles it for a closer look. To see the next frame, run_frames first.",
-            inputSchema: { type: "object", properties: { scale: { type: "integer", minimum: 1, maximum: 4 } } },
-            run: (a) => ({
-                content: [
-                    { type: "text", text: JSON.stringify({ frame_count: engine.frameCount }) },
-                    { type: "image", data: engine.screenshotPng({ scale: a.scale ?? 1 }).toString("base64"), mimeType: "image/png" },
-                ],
-            }),
+                "A screenshot of the last complete frame, as a PNG, with its frame number so a new picture can be told from the same one twice. " +
+                "frames > 1 gives that many frames, `every` frames apart (default 1; 50 is a second), each an image tagged with its frame number " +
+                "and time: motion, flicker and animation as still pictures. Taking a sequence runs the machine and leaves it stopped at the last. " +
+                "scale 2 doubles each picture.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    scale: { type: "integer", minimum: 1, maximum: 4 },
+                    frames: { type: "integer", minimum: 1, maximum: 16 },
+                    every: { type: "integer", minimum: 1, maximum: 250 },
+                },
+            },
+            run: async (a) => {
+                const frames = Math.max(1, Math.min(16, a.frames ?? 1));
+                const every = Math.max(1, Math.min(250, a.every ?? 1));
+                const shot = () => ({ type: "image", data: engine.screenshotPng({ scale: a.scale ?? 1 }).toString("base64"), mimeType: "image/png" });
+                if (frames === 1) return { content: [{ type: "text", text: JSON.stringify({ frame_count: engine.frameCount }) }, shot()] };
+                engine.pause("Screen sequence", { internal: true });
+                const content = [];
+                const first = engine.frameCount;
+                for (let i = 0; i < frames; i++) {
+                    if (i > 0) {
+                        const stop = await engine.runFrames(every);
+                        if (stop) {
+                            content.push({ type: "text", text: JSON.stringify({ stopped_reason: stoppedReason(stop), stopped: stop.description }) });
+                            break;
+                        }
+                    }
+                    content.push({ type: "text", text: JSON.stringify({ frame_count: engine.frameCount, ms: (engine.frameCount - first) * 20 }) });
+                    content.push(shot());
+                }
+                engine.emitStopAt(`Screen sequence of ${frames} frames`, "pause");
+                return { content };
+            },
         },
         get_screen_text: {
             description:
@@ -659,8 +718,8 @@ export function makeTools(engine, serverInfo) {
         },
 
         // --- sound -----------------------------------------------------------
-        read_sound_state: {
-            description: "The SN76489 sound chip's registers: each tone channel's period (and frequency) and volume, the noise register, the latched register and the LFSR.",
+        get_sound_state: {
+            description: "The SN76489 sound chip's registers: each tone channel's period (and frequency) and attenuation, the noise register, the latched register and the LFSR.",
             run: () => {
                 const sc = engine.session._soundChip;
                 if (!sc?.getState) throw new Error("This machine has no sound chip to read");
@@ -674,21 +733,19 @@ export function makeTools(engine, serverInfo) {
                 };
             },
         },
-        start_sound_capture: {
-            description: "Log every byte written to the sound chip, with its cycle, until stop_sound_capture. Clears any earlier log.",
-            run: () => {
-                const sc = engine.session._soundChip;
-                if (!sc?.startCapture) throw new Error("This machine has no sound chip to capture");
-                sc.startCapture();
-                return { capturing: true };
-            },
-        },
-        stop_sound_capture: {
-            description: "Stop logging sound chip writes and return them decoded (channel, tone or volume, value), the most recent max_entries (default 500).",
-            inputSchema: { type: "object", properties: { max_entries: { type: "integer", minimum: 1 } } },
+        sound_capture: {
+            description:
+                'Log every byte written to the sound chip, with its cycle: action "start" (clearing any earlier log), then "stop" to have ' +
+                "them back decoded (channel, tone or volume, value), the most recent max_entries (default 500).",
+            inputSchema: { type: "object", properties: { action: { type: "string", enum: ["start", "stop"] }, max_entries: { type: "integer", minimum: 1 } }, required: ["action"] },
             run: (a) => {
                 const sc = engine.session._soundChip;
-                if (!sc?.stopCapture) throw new Error("This machine has no sound chip to capture");
+                if (!sc?.startCapture) throw new Error("This machine has no sound chip to capture");
+                if (a.action === "start") {
+                    sc.startCapture();
+                    return { capturing: true };
+                }
+                if (a.action !== "stop") throw new Error('action is "start" or "stop"');
                 const writes = sc.stopCapture();
                 const max = a.max_entries ?? 500;
                 const header = writes.length > max ? `Last ${max} of ${writes.length} writes:` : `${writes.length} writes:`;

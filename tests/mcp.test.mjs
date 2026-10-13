@@ -19,7 +19,7 @@ test("MCP: handshake and tool list", async (t) => {
     assert.match(init.result.instructions, /no sessions/);
     const { tools } = (await mcp(server, "tools/list")).result;
     const names = new Set(tools.map((t) => t.name));
-    for (const name of ["load_program", "run_basic", "run_until_prompt", "run_frames", "run_for_cycles", "get_screen", "keyboard_state", "save_state", "read_sound_state", "save_memory"]) {
+    for (const name of ["load_program", "run_basic", "run_until_prompt", "run_frames", "run_for_cycles", "get_screen", "keyboard_state", "save_state", "get_sound_state", "sound_capture", "save_memory"]) {
         assert.ok(names.has(name), name);
     }
     const reset = tools.find((t) => t.name === "reset");
@@ -93,7 +93,7 @@ test("MCP: program, breakpoints, memory, states", async (t) => {
     assert.equal((await tool(server, "list_states"))[0].label, "at print_message");
 
     await tool(server, "set_breakpoint", { address: "again", condition: "?counter=3" });
-    const run = await tool(server, "run", { wait_ms: 5000 });
+    const run = await tool(server, "run");
     assert.equal(run.stopped_reason, "breakpoint");
     assert.equal((await tool(server, "evaluate", { expression: "?counter" })).value, 3);
     await tool(server, "clear_breakpoint", {});
@@ -104,10 +104,11 @@ test("MCP: program, breakpoints, memory, states", async (t) => {
     await tool(server, "delete_state", { state_id });
     assert.deepEqual(await tool(server, "list_states"), []);
 
-    // Watchpoints by set_breakpoint's type, as jsbeeb-mcp spells it.
-    await tool(server, "set_breakpoint", { address: "counter", type: "write" });
-    const watched = await tool(server, "run", { wait_ms: 5000 });
+    // A watchpoint says what changed, from what to what, and which instruction did it.
+    await tool(server, "set_watchpoint", { address: "counter" });
+    const watched = await tool(server, "run");
     assert.equal(watched.stopped_reason, "watchpoint");
+    assert.deepEqual(watched.watch_stop, { watchpoint: watched.watch_stop.watchpoint, access: "write", address: "&0070 (counter)", old: "&00", new: "&01", by: "&1911 (again+3)" });
     await tool(server, "clear_watchpoint", {});
 
     const mem = await tool(server, "read_memory", { address: "message", length: 5 });
@@ -125,12 +126,12 @@ test("MCP: the sound chip", async (t) => {
     const server = await startServer();
     t.after(() => server.stop());
     await tool(server, "run_until_prompt");
-    await tool(server, "start_sound_capture");
+    await tool(server, "sound_capture", { action: "start" });
     await tool(server, "type_text", { text: "SOUND 1,-15,53,10" });
     await tool(server, "run_frames", { count: 5 });
-    const state = await tool(server, "read_sound_state");
+    const state = await tool(server, "get_sound_state");
     assert.equal(state.channels.length, 3);
-    const log = await tool(server, "stop_sound_capture");
+    const log = await tool(server, "sound_capture", { action: "stop" });
     assert.match(log, /writes:\n/);
     // The OS puts BASIC's channel 1 on the chip's tone channel 2.
     assert.match(log, /CH2 volume attenuation 0\n.*CH2 tone low 5\n.*CH2 tone high 29/, log);
@@ -157,4 +158,49 @@ test("MCP: printed output is a transcript; screen text is what the screen shows 
     await tool(server, "type_text", { text: 'VDU 31,10,5:PRINT "X"' });
     const out = await tool(server, "run_until_prompt");
     assert.match(out.output, /VDU 31,10,5:PRINT "X"\nX\n>$/);
+});
+
+test("MCP: a run that nothing stops times out; on_change passes over a write of the same value", async (t) => {
+    const server = await startServer();
+    t.after(() => server.stop());
+    await tool(server, "run_until_prompt");
+    await tool(server, "write_memory", { address: "&70", data: [0] });
+    // A tenth of a second's wait first, so RUN has been typed before the first write.
+    await tool(server, "load_basic", { source: "10 T%=TIME:REPEAT UNTIL TIME>T%+10\n20 ?&70=5\n30 GOTO 20" });
+    await tool(server, "type_text", { text: "RUN" });
+    await tool(server, "set_watchpoint", { address: "&70" });
+    // The first write changes 0 to 5, and stops...
+    const first = await tool(server, "run", { timeout_secs: 2 });
+    assert.equal(first.stopped_reason, "watchpoint");
+    assert.equal(first.watch_stop.new, "&05");
+    // ...every one after writes 5 over 5, which changes nothing: the run ends at its bound instead.
+    const second = await tool(server, "run", { timeout_secs: 1 });
+    assert.equal(second.completed, false);
+    assert.equal(second.stopped_reason, "timeout");
+    assert.ok(second.cycles_run >= 2000000 && second.cycles_run < 2100000, String(second.cycles_run));
+    // Without on_change, every write stops it.
+    await tool(server, "clear_watchpoint", {});
+    await tool(server, "set_watchpoint", { address: "&70", on_change: false });
+    assert.equal((await tool(server, "run", { timeout_secs: 2 })).stopped_reason, "watchpoint");
+    await tool(server, "clear_watchpoint", {});
+    // value: only a write of that byte.
+    await tool(server, "set_watchpoint", { address: "&70", value: 6 });
+    assert.equal((await tool(server, "run", { timeout_secs: 0.5 })).stopped_reason, "timeout");
+    // wait: false leaves it running.
+    assert.equal((await tool(server, "run", { wait: false })).running, true);
+    await tool(server, "pause");
+});
+
+test("MCP: get_screen with frames gives a sequence, each tagged with its frame", async (t) => {
+    const server = await startServer();
+    t.after(() => server.stop());
+    await tool(server, "run_until_prompt");
+    const content = (await mcp(server, "tools/call", { name: "get_screen", arguments: { frames: 3, every: 2 } })).result.content;
+    const tags = content.filter((c) => c.type === "text").map((c) => JSON.parse(c.text));
+    assert.equal(content.filter((c) => c.type === "image").length, 3);
+    assert.deepEqual(
+        tags.map((x) => x.frame_count - tags[0].frame_count),
+        [0, 2, 4],
+    );
+    assert.deepEqual(tags.map((x) => x.ms), [0, 40, 80]);
 });

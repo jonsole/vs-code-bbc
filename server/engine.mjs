@@ -136,10 +136,17 @@ export class Engine extends EventEmitter {
     // -----------------------------------------------------------------------
     // Running
 
-    resume({ internal = false } = {}) {
+    /**
+     * Run on in real time. With `limitSeconds`, stop by itself after that much
+     * emulated time, as a pause with timedOut set: a run waited on that no
+     * breakpoint ends must still end.
+     */
+    resume({ internal = false, limitSeconds } = {}) {
         if (this.running) return;
         this.running = true;
         this._pendingStop = null;
+        this._runDeadline = limitSeconds === undefined ? undefined : this.elapsedCycles + limitSeconds * this.model.cyclesPerSecond;
+        this._runLimit = limitSeconds;
         // Skip the hooks for the instruction at PC: continuing from a breakpoint must not stop on it again.
         this.cpu.breakpointResume = true;
         this._lastTick = performance.now();
@@ -188,6 +195,11 @@ export class Engine extends EventEmitter {
             if (stop.reason === "step" && this._step?.internal) stop.internal = true;
             this._halt();
             this._stopped(stop);
+            return;
+        }
+        if (!this._step && this._runDeadline !== undefined && this.elapsedCycles > this._runDeadline) {
+            this._halt();
+            this._stopped({ reason: "pause", description: `Ran ${this._runLimit}s without stopping`, timedOut: true });
             return;
         }
         if (this._step?.deadline !== undefined && this.elapsedCycles > this._step.deadline) {
@@ -388,15 +400,22 @@ export class Engine extends EventEmitter {
         for (const w of this._watchpoints.values()) {
             if (w.access !== "readwrite" && w.access !== access) continue;
             if (addr < w.address || addr >= w.address + w.length) continue;
+            // jsbeeb calls the write hook before the byte is stored, so what is
+            // there now is the old value.
+            const old = access === "write" ? this.peek(addr) : val;
+            if (access === "write" && w.onChange && old === val) continue;
+            if (w.value !== undefined && val !== w.value) continue;
+            if (w.notValue !== undefined && val === w.notValue) continue;
             if (w.condition && !this._safeEval(w.compiled, w, { value: val })) continue;
             w.hits++;
+            // The instruction making the access: where it started, which jsbeeb
+            // records before running it -- PC itself has moved on into it.
+            const by = this.cpu.oldPcArray[this.cpu.oldPcIndex];
             this._pendingStop = {
                 reason: "data breakpoint",
-                description: `${access === "read" ? "Read" : "Write"} of ${hex(val, 2)} at ${this.describeAddress(addr)} by the instruction at ${hex(this.cpu.pc)}`,
+                description: `${access === "read" ? "Read" : "Write"} of ${hex(val, 2)} at ${this.describeAddress(addr)} by the instruction at ${this.describeAddress(by)}`,
                 breakpointIds: [w.id],
-                access,
-                address: addr,
-                value: val,
+                watchStop: { watchpoint: w.id, access, address: addr, old, new: val, by },
             };
             return true;
         }
@@ -485,9 +504,31 @@ export class Engine extends EventEmitter {
     }
 
     /** access: "read" | "write" | "readwrite" */
-    addWatchpoint({ owner = "mcp", address, length = 1, access = "write", condition }) {
+    /**
+     * access: "read" | "write" | "readwrite". onChange: only a write that
+     * changes the value (VS Code's data breakpoints stop on every write, so
+     * it is off unless asked for). value / notValue: only an access of, or
+     * not of, that byte.
+     */
+    addWatchpoint({ owner = "mcp", address, length = 1, access = "write", condition, onChange = false, value, notValue }) {
         if (!["read", "write", "readwrite"].includes(access)) throw new Error(`access must be read, write or readwrite`);
-        const w = { id: this._nextWatchId++, owner, address: address & 0xffff, length: Math.max(1, length | 0), access, condition, hits: 0 };
+        for (const v of [value, notValue]) {
+            if (v !== undefined && !(Number.isInteger(v) && v >= 0 && v <= 255)) throw new Error("a watchpoint watches bytes: the value must be 0-255");
+        }
+        if (value !== undefined && notValue !== undefined) throw new Error("value and not_value are two answers to the same question");
+        const w = {
+            id: this._nextWatchId++,
+            owner,
+            address: address & 0xffff,
+            length: Math.max(1, length | 0),
+            access,
+            condition,
+            // A value test asks about every write, including one of the same value again.
+            onChange: value === undefined && notValue === undefined && onChange,
+            value,
+            notValue,
+            hits: 0,
+        };
         if (condition) w.compiled = compile(condition);
         this._watchpoints.set(w.id, w);
         this._updateHooks();
