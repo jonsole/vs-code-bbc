@@ -135,3 +135,26 @@ test("MCP: the sound chip", async (t) => {
     // The OS puts BASIC's channel 1 on the chip's tone channel 2.
     assert.match(log, /CH2 volume attenuation 0\n.*CH2 tone low 5\n.*CH2 tone high 29/, log);
 });
+
+test("MCP: printed output is a transcript; screen text is what the screen shows now", async (t) => {
+    const server = await startServer();
+    t.after(() => server.stop());
+    for (const mode of [7, 1, 0]) {
+        const source = `10 MODE ${mode}\n20 PRINT "GONE"\n30 CLS\n40 PRINT "Hello #_"\n50 COLOUR 129:COLOUR 0:PRINT "inverse"`;
+        const run = (await mcp(server, "tools/call", { name: "run_basic", arguments: { source, screenshot: false } })).result.content;
+        const { output } = JSON.parse(run[0].text);
+        // In order, with each clear (MODE, CLS) a form feed: nothing printed before one mixes into what follows.
+        assert.equal(output, "RUN\n\fGONE\n\fHello #_\ninverse\n>", `MODE ${mode} output`);
+        // The screen as it is: what CLS took away is gone, inverse text reads.
+        assert.equal(await tool(server, "get_screen_text"), "Hello #_\ninverse\n>", `MODE ${mode} screen`);
+    }
+    // A scrolled MODE 7 screen reads from where the scroll left the top.
+    await mcp(server, "tools/call", { name: "run_basic", arguments: { source: '10 MODE 7\n20 FOR I%=1 TO 30:PRINT "row ";I%:NEXT', screenshot: false } });
+    const rows = (await tool(server, "get_screen_text")).split("\n");
+    assert.equal(rows.length, 25);
+    assert.equal(rows.at(-2), "row 30");
+    // A positioned print appears once in the output, without its coordinates.
+    await tool(server, "type_text", { text: 'VDU 31,10,5:PRINT "X"' });
+    const out = await tool(server, "run_until_prompt");
+    assert.match(out.output, /VDU 31,10,5:PRINT "X"\nX\n>$/);
+});

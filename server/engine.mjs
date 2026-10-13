@@ -31,6 +31,8 @@ import { DebugInfo } from "./debug_info.mjs";
 import { discFor } from "../vendor/jsbeeb/src/fdc.js";
 import { createSnapshot, restoreSnapshot, snapshotToJSON, snapshotFromJSON } from "../vendor/jsbeeb/src/snapshot.js";
 import { encodePng } from "./png.mjs";
+import { VduTranscript } from "./vdu_transcript.mjs";
+import { fontIndex, readScreenText, VduVars } from "./screen_text.mjs";
 
 const FbWidth = 1024;
 const FbHeight = 625;
@@ -120,6 +122,9 @@ export class Engine extends EventEmitter {
         this.cpu = this.session._machine.processor;
         this.machine = this.session._machine;
         this._lastFrameSeen = this.session.frameCount;
+        // What is printed, in order, for the run tools' `output`.
+        this._transcript = new VduTranscript();
+        this.machine.onVduChar((c) => this._transcript.write(c));
         this._installHooks();
         if (wasRunning) this.resume();
     }
@@ -721,18 +726,31 @@ export class Engine extends EventEmitter {
         return encodePng(out, width * k, height * k);
     }
 
-    /** What is on screen as text (any mode), read from the VDU stream since it was last read. */
-    screenText({ clear = false } = {}) {
-        return this.session.drainOutput({ clear });
+    /**
+     * What the screen says now, read from screen memory (see screen_text.mjs):
+     * MODE 7 exactly, other modes by matching each cell against the MOS font.
+     */
+    screenText() {
+        const vdu = (a) => this.peek(a);
+        const mode = vdu(VduVars.mode) & 7;
+        const topLeft = vdu(VduVars.topLeft) | (vdu(VduVars.topLeft + 1) << 8);
+        const rowBytes = vdu(VduVars.rowBytes) | (vdu(VduVars.rowBytes + 1) << 8);
+        const screenStart = vdu(VduVars.screenStartHi) << 8;
+        Engine._font ??= fontIndex(fs.readFileSync(path.join(PackageRoot, "vendor/jsbeeb/public/roms/os.rom")).subarray(0, 95 * 8));
+        // A Master showing its shadow screen (ACCCON bit 0) shows shadow RAM, not main.
+        const shadow = this.model.isMaster && (this.cpu.acccon & 1) !== 0;
+        const read = () =>
+            readScreenText({ read: (a) => this.peek(a), mode, topLeft, rowBytes, screenStart, font: Engine._font });
+        return shadow ? this.session._withPaging({ shadow: true }, read) : read();
     }
 
     /**
-     * The text printed through OSWRCH since the output was last taken, laid out
-     * by where it went on the screen; `clear: false` peeks, leaving it to be
-     * taken again.
+     * What was printed through OSWRCH since the output was last taken, in
+     * order, as a transcript (see vdu_transcript.mjs); `clear: false` peeks,
+     * leaving it to be taken again.
      */
     takeOutput({ clear = true } = {}) {
-        return this.session.drainOutput({ clear }).screenText.replace(/^\n+/, "");
+        return this._transcript.take({ clear });
     }
 
     // -----------------------------------------------------------------------

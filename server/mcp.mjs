@@ -534,10 +534,11 @@ export function makeTools(engine, serverInfo) {
         },
         get_screen_text: {
             description:
-                "The text printed through the OS (OSWRCH) that has not been taken yet, laid out as on screen, in any mode. The run tools take it as they " +
-                "go, so this is what was printed since. Programs writing straight to screen memory don't show here: get_screen does.",
-            inputSchema: { type: "object", properties: { clear: { type: "boolean", description: "Take it (default false: peek)" } } },
-            run: (a) => ({ content: [{ type: "text", text: engine.takeOutput({ clear: !!a.clear }) }] }),
+                "What the screen says now, as rows of text, read from screen memory: MODE 7 exactly, other modes by matching " +
+                "each character cell against the font (inverse text too). A cell that is not a character -- a sprite, graphics, " +
+                "a user-defined character -- shows as ·. Right after a CLS or a scroll, and for programs that write the screen " +
+                "themselves. What was printed, in order, is the run tools' `output` instead.",
+            run: () => ({ content: [{ type: "text", text: engine.screenText() }] }),
         },
 
         // --- the keyboard --------------------------------------------------
