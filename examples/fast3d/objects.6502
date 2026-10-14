@@ -1,0 +1,77 @@
+\ objects.6502 -- the demo's objects, each about 85 units in radius: a cube,
+\ and an icosahedron, whose twelve corners are (0, +-45, +-73) turned three
+\ ways. The same as the ZX Spectrum's fast3d (its build.py makes them, edges
+\ and all, and this is a copy).
+
+CUBE_VERTICES = 8
+CUBE_EDGES = 12
+.cube_vertices
+    EQUB LO(-49), LO(-49), LO(-49)
+    EQUB LO(-49), LO(-49), LO(49)
+    EQUB LO(-49), LO(49), LO(-49)
+    EQUB LO(-49), LO(49), LO(49)
+    EQUB LO(49), LO(-49), LO(-49)
+    EQUB LO(49), LO(-49), LO(49)
+    EQUB LO(49), LO(49), LO(-49)
+    EQUB LO(49), LO(49), LO(49)
+.cube_edges
+    EQUB 0, 1
+    EQUB 0, 2
+    EQUB 0, 4
+    EQUB 1, 3
+    EQUB 1, 5
+    EQUB 2, 3
+    EQUB 2, 6
+    EQUB 3, 7
+    EQUB 4, 5
+    EQUB 4, 6
+    EQUB 5, 7
+    EQUB 6, 7
+
+ICOSAHEDRON_VERTICES = 12
+ICOSAHEDRON_EDGES = 30
+.icosahedron_vertices
+    EQUB LO(0), LO(45), LO(73)
+    EQUB LO(45), LO(73), LO(0)
+    EQUB LO(73), LO(0), LO(45)
+    EQUB LO(0), LO(45), LO(-73)
+    EQUB LO(45), LO(-73), LO(0)
+    EQUB LO(-73), LO(0), LO(45)
+    EQUB LO(0), LO(-45), LO(73)
+    EQUB LO(-45), LO(73), LO(0)
+    EQUB LO(73), LO(0), LO(-45)
+    EQUB LO(0), LO(-45), LO(-73)
+    EQUB LO(-45), LO(-73), LO(0)
+    EQUB LO(-73), LO(0), LO(-45)
+.icosahedron_edges
+    EQUB 0, 1
+    EQUB 0, 2
+    EQUB 0, 5
+    EQUB 0, 6
+    EQUB 0, 7
+    EQUB 1, 2
+    EQUB 1, 3
+    EQUB 1, 7
+    EQUB 1, 8
+    EQUB 2, 4
+    EQUB 2, 6
+    EQUB 2, 8
+    EQUB 3, 7
+    EQUB 3, 8
+    EQUB 3, 9
+    EQUB 3, 11
+    EQUB 4, 6
+    EQUB 4, 8
+    EQUB 4, 9
+    EQUB 4, 10
+    EQUB 5, 6
+    EQUB 5, 7
+    EQUB 5, 10
+    EQUB 5, 11
+    EQUB 6, 10
+    EQUB 7, 11
+    EQUB 8, 9
+    EQUB 9, 10
+    EQUB 9, 11
+    EQUB 10, 11
+

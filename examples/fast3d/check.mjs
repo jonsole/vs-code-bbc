@@ -9,6 +9,13 @@
 //    include every corner of the cube of signed bytes -- the largest sums.
 // 3. divide_unsigned, on the edges of what fits a byte and a random spread.
 // 4. project and transform, on random vertices, matrices and distances.
+// 5. draw_line, every byte of the 10K screen after each batch of lines,
+//    against model.line, on lines every way and length and on both screens
+//    (&3000 and &5800); and clear_box.
+// 6. The demo (DEMO, from build/fast3d.ssd): draw_frame, frame after frame
+//    for each object, on the screen at &3000 (so clearing its own last box),
+//    against the model's picture of the same frame; and timed. A frame goes
+//    to demo.png.
 //
 // The cycles come from the CPU's own count, page crossings and all.
 //
@@ -18,12 +25,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { fake6502 } from "../../vendor/jsbeeb/src/fake6502.js";
 import * as model from "./model.mjs";
+import { encodePng } from "../../server/png.mjs";
 
 const Here = path.dirname(fileURLToPath(import.meta.url));
 const Build = path.join(Here, "build");
-const RETURN = 0x0e00; // a return address nothing runs
+const RETURN = 0x0d00; // a return address nothing runs
 const ZP = 0x70; // FAST3D_ZP, and the variables at it, as fast3d.6502 has them
-const Zp = { acc: 0, rot_x: 2, rot_y: 4, rot_z: 6, zoff: 8, angle_x: 13, div_lo: 16, div_by: 17, vptr: 18, pptr: 20, count: 22, screen_x: 23, screen_y: 24 };
+const Zp = { acc: 0, rot_x: 2, rot_y: 4, rot_z: 6, zoff: 8, angle_x: 13, div_lo: 16, div_by: 17, vptr: 18, pptr: 20, count: 22, screen_x: 23, screen_y: 24, screen_add: 25 };
 
 /** BeebAsm's -labels dump: [{'.name':valueL,...}] */
 export function readLabels(file) {
@@ -41,12 +49,12 @@ export class Machine {
     }
     constructor() {
         this.cpu = fake6502();
+        this.cpu.debugInstruction.add((pc) => pc === RETURN);
     }
     load() {
         this.labels = readLabels(path.join(Build, "checks.labels"));
         const image = fs.readFileSync(path.join(Build, "checks.bin"));
         image.forEach((b, i) => this.cpu.writemem(this.labels.start + i, b));
-        this.cpu.debugInstruction.add((pc) => pc === RETURN);
     }
     peek(address) {
         return this.cpu.readmem(address);
@@ -235,16 +243,146 @@ function checkTransform(m, failures) {
     console.log("                 (transform: per vertex, of 16)");
 }
 
-export async function runChecks() {
+const screenBytes = (m, base) => Uint8Array.from({ length: 10240 }, (_, i) => m.peek(base + i));
+const sameBytes = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+function checkLines(m, failures) {
+    const times = [];
+    const along = { x: [], y: [] };
+    const rnd = random(6);
+    const lines = [[0, 0, 255, 254], [255, 0, 0, 254], [0, 254, 255, 0], [5, 9, 5, 9], [0, 100, 255, 100],
+        [255, 50, 0, 50], [17, 0, 17, 254], [200, 254, 200, 0], [0, 0, 254, 254], [255, 0, 64, 254]];
+    for (let i = 0; i < 3000; i++) {
+        let [x0, y0, x1, y1] = [rnd(256), rnd(255), rnd(256), rnd(255)];
+        if (rnd(4) === 0) {
+            x1 = Math.max(0, Math.min(255, x0 + rnd(19) - 9));
+            y1 = Math.max(0, Math.min(254, y0 + rnd(19) - 9));
+        }
+        lines.push([x0, y0, x1, y1]);
+    }
+    for (const [base, add, step] of [[0x3000, 0, 8], [0x5800, 0x28, 500]]) {
+        m.poke(m.zp("screen_add"), [add]);
+        for (let start = 0; start < lines.length; start += step) {
+            const batch = step === 8 ? lines.slice(start, start + 8) : lines.slice(start, start + 3);
+            m.poke(base, new Array(10240).fill(0));
+            for (const l of batch) {
+                m.poke(m.zp("rot_x"), l);  // line_x0, line_y0, line_x1, line_y1
+                const t = m.call("draw_line");
+                times.push(t);
+                const pixels = model.line(...l).length;
+                if (pixels > 40) along[Math.abs(l[2] - l[0]) >= Math.abs(l[3] - l[1]) ? "x" : "y"].push(t / pixels);
+            }
+            if (!sameBytes(screenBytes(m, base), model.render(batch, base))) {
+                failures.push(`draw_line at &${base.toString(16)}: ${JSON.stringify(batch)} differ from the model`);
+                if (failures.length > 5) return;
+            }
+        }
+    }
+    report("draw_line", times);
+    const mean = (a) => Math.round(a.reduce((p, q) => p + q, 0) / a.length);
+    console.log(`  ${"".padEnd(14)} ${mean(along.x)} cycles a pixel along x, ${mean(along.y)} along y (lines over 40 pixels)`);
+
+    const clearTimes = [];
+    m.poke(m.zp("screen_add"), [0]);
+    for (let i = 0; i < 200; i++) {
+        const rows = 1 + rnd(32);
+        const top = rnd(33 - rows);
+        const width = 1 + rnd(32);
+        const left = rnd(33 - width);
+        m.poke(0x3000, new Array(10240).fill(0xff));
+        m.poke(m.zp("rot_x"), [left, 0, width]);  // line_x0, line_x1
+        clearTimes.push(m.call("clear_box", { a: top, x: rows }));
+        const want = new Uint8Array(10240).fill(0xff);
+        for (let y = top * 8; y < (top + rows) * 8; y++) for (let col = left; col < left + width; col++) want[model.screenAddress(col * 8, y) - 0x3000] = 0;
+        if (!sameBytes(screenBytes(m, 0x3000), want)) failures.push(`clear_box rows ${top}+${rows} columns ${left}+${width}`);
+    }
+    report("clear_box", clearTimes);
+}
+
+/** A file from a DFS disc image: [load address, bytes]. */
+export function ssdFile(ssd, name) {
+    for (let i = 8; i < 8 + ssd[0x105]; i += 8) {
+        const fileName = String.fromCharCode(...ssd.subarray(i, i + 7)).trimEnd();
+        if (fileName !== name) continue;
+        const info = ssd.subarray(0x100 + i, 0x108 + i);
+        const top = info[6];
+        const load = info[0] | (info[1] << 8);
+        const length = info[4] | (info[5] << 8) | (((top >> 4) & 3) << 16);
+        const sector = info[7] | ((top & 3) << 8);
+        return [load, ssd.subarray(sector * 256, sector * 256 + length)];
+    }
+    throw new Error(`no ${name} on the disc`);
+}
+
+/** The demo's objects, from objects.6502. */
+function readObjects() {
+    const text = fs.readFileSync(path.join(Here, "objects.6502"), "utf8");
+    const result = [];
+    for (const name of ["cube", "icosahedron"]) {
+        const vertices = [...text.split(`.${name}_vertices`)[1].split(`.${name}_edges`)[0].matchAll(/LO\((-?\d+)\), LO\((-?\d+)\), LO\((-?\d+)\)/g)].map((m) => m.slice(1).map(Number));
+        const edges = [...text.split(`.${name}_edges`)[1].split("\n\n")[0].matchAll(/EQUB (\d+), (\d+)/g)].map((m) => m.slice(1).map(Number));
+        result.push({ name, vertices, edges });
+    }
+    return result;
+}
+
+async function checkDemo(failures, picture) {
+    const m = new Machine();
+    await m.cpu.initialise();
+    m.labels = readLabels(path.join(Build, "demo.labels"));
+    const [, image] = ssdFile(fs.readFileSync(path.join(Build, "fast3d.ssd")), "DEMO");
+    m.poke(0x0e00, [...image]); // assembled to run at &0E00, where it copies itself
+    const distance = 400;
+    m.poke(m.zp("zoff"), [(distance * 128) & 0xff, (distance * 128) >> 8]);
+    m.poke(m.zp("screen_add"), [0]);
+    m.poke(m.zp("angle_x"), [0, 0, 0]);
+    m.poke(0x3000, new Array(10240).fill(0));
+    const frames = [];
+    for (const [index, { name, vertices, edges }] of readObjects().entries()) {
+        const pointer = m.labels.objects + 6 * index;
+        m.poke(0x8a, [pointer & 0xff, pointer >> 8]); // the demo's `object`
+        const times = [];
+        for (let i = 0; i < 64; i++) {
+            times.push(m.call("draw_frame"));
+            const angles = [0, 1, 2].map((a) => m.peek(m.zp("angle_x") + a));
+            const matrix = model.makeMatrix(...angles);
+            const points = vertices.map((v) => model.project(model.rotate(matrix, v), distance * 128));
+            const lines = edges.filter(([a, b]) => points[a] && points[b]).map(([a, b]) => [...points[a], ...points[b]]);
+            const got = screenBytes(m, 0x3000);
+            if (!sameBytes(got, model.render(lines, 0x3000))) {
+                failures.push(`demo: the ${name} at angles ${angles} differs from the model`);
+                break;
+            }
+            frames.push(got);
+        }
+        report(`demo: ${name}`, times);
+    }
+    if (!picture) return;
+    // a frame as the BBC shows it: white on black, the whole 320 x 256
+    const frame = frames[20];
+    const rgba = new Uint8Array(320 * 256 * 4);
+    for (let y = 0; y < 256; y++) {
+        for (let x = 0; x < 320; x++) {
+            const on = frame[(y >> 3) * 320 + (y & 7) + (x >> 3) * 8] & (0x80 >> (x & 7));
+            rgba.set(on ? [255, 255, 255, 255] : [0, 0, 0, 255], (y * 320 + x) * 4);
+        }
+    }
+    fs.writeFileSync(picture, encodePng(rgba, 320, 256));
+    console.log(`  a frame to ${picture}`);
+}
+
+/** Every check; the failures. `picture`: where to write a frame of the demo, as a PNG. */
+export async function runChecks({ picture } = {}) {
     const m = await Machine.create();
     const failures = [];
     checkTables(m, failures);
-    for (const check of [checkMul8s, checkMatrixAndRotate, checkDivide, checkTransform]) check(m, failures);
+    for (const check of [checkMul8s, checkMatrixAndRotate, checkDivide, checkTransform, checkLines]) check(m, failures);
+    await checkDemo(failures, picture);
     return failures;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-    const failures = await runChecks();
+    const failures = await runChecks({ picture: path.join(Here, "demo.png") });
     if (failures.length) {
         console.log(failures.slice(0, 20).join("\n"));
         console.log(`${failures.length} failures`);

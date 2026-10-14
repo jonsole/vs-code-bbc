@@ -1,9 +1,11 @@
 \ fast3d.6502 -- fast 3D for the 6502, for BeebAsm: signed multiplication, a
-\ rotation matrix from three angles, rotating and projecting vertices.
+\ rotation matrix from three angles, rotating and projecting vertices, and
+\ drawing lines on a MODE 4 screen.
 \
-\ INCLUDE it anywhere in a program. It aligns its tables itself (2K, on page
-\ boundaries) and uses 25 bytes of zero page from FAST3D_ZP, &70 unless the
-\ program sets it first (or beebasm -D FAST3D_ZP=...).
+\ INCLUDE it anywhere in a program, before code that uses its zero page. It
+\ aligns its tables itself (2.5K, on page boundaries) and uses 26 bytes of
+\ zero page from FAST3D_ZP: &70 unless the program sets it first (or
+\ beebasm -D FAST3D_ZP=...).
 \
 \ Numbers, the same as the ZX Spectrum's fast3d (model.mjs has them exactly):
 \ - an angle is a byte, 256 to the turn;
@@ -658,5 +660,288 @@ ENDMACRO
 .same_page_2
     dec count
     bne next
+    rts
+}
+
+
+\ ---------------------------------------------------------------------------
+\ Lines, on a MODE 4 screen (or any 320 x 256 one-bit mode), in the 256 x 255
+\ window project lands in: the screen's middle 256 columns, 32 pixels in.
+\
+\ draw_line draws by Bresenham, downwards (its ends swapped if need be),
+\ stepping along whichever of x and y the line is longer in. Each of the four
+\ ways it can go is eight blocks, one for each bit of a screen byte, so a
+\ pixel is one LDA/ORA/STA; moving to the next bit is falling into the next
+\ block, and to the next byte, 8 more or less in Y once in eight pixels.
+\
+\ ROW_LO and ROW_HI give each row's address on the screen at SCREEN_A, and
+\ screen_add is added to the high byte: 0 for SCREEN_A, SCREEN_B - SCREEN_A
+\ for the other.
+
+SCREEN_A        =? &3000
+SCREEN_B        =? &5800
+WINDOW_LEFT     = 32            \ bytes: 32 pixels, four character cells
+
+\ Drawing never happens during rotate or project, so it borrows their bytes.
+line_x0     = rot_x             \ draw_line's ends
+line_y0     = rot_x + 1
+line_x1     = rot_y
+line_y1     = rot_y + 1
+line_ptr    = rot_z             \ 2: the row being drawn on
+line_count  = vx                \ pixels left
+line_major  = vy                \ the length along the longer axis
+line_minor  = vz                \ along the shorter
+line_entry  = acc               \ 2: the block the first pixel is in
+screen_add  = FAST3D_ZP + 25    \ 0 for SCREEN_A, else SCREEN_B - SCREEN_A, high bytes
+
+ALIGN &100
+.ROW_LO
+FOR y, 0, 255
+    EQUB LO(SCREEN_A + (y DIV 8) * 320 + (y MOD 8) + WINDOW_LEFT)
+NEXT
+.ROW_HI
+FOR y, 0, 255
+    EQUB HI(SCREEN_A + (y DIV 8) * 320 + (y MOD 8) + WINDOW_LEFT)
+NEXT
+
+\ Down a row from line_ptr. Uses A; keeps X and Y.
+MACRO DOWN_ROW
+    lda line_ptr
+    and #7
+    cmp #7
+    beq next_cell
+    inc line_ptr                \ within the character row: no carry
+    bne done                    \ (always: the low three bits were not 7)
+.next_cell
+    lda line_ptr                \ (carry set) + 313: the next character row
+    adc #LO(312)
+    sta line_ptr
+    lda line_ptr + 1
+    adc #HI(312)
+    sta line_ptr + 1
+.done
+ENDMACRO
+
+\ A pixel of a line longer along x: X is the error.
+MACRO ALONG_X bit, next
+    lda (line_ptr), Y
+    ora #1 << bit
+    sta (line_ptr), Y
+    dec line_count
+    bne more
+    rts
+.more
+    txa
+    sec
+    sbc line_minor
+    tax
+    bcs next
+    adc line_major              \ (carry clear)
+    tax
+    DOWN_ROW
+ENDMACRO
+
+\ A pixel of a line longer along y: every pixel moves down a row; when the
+\ error runs out, one along x, into the next block. self is this block.
+MACRO ALONG_Y bit, self
+    lda (line_ptr), Y
+    ora #1 << bit
+    sta (line_ptr), Y
+    dec line_count
+    bne more
+    rts
+.more
+    DOWN_ROW
+    txa
+    sec
+    sbc line_minor
+    tax
+    bcs self
+    adc line_major              \ (carry clear)
+    tax
+ENDMACRO
+
+\ draw_line: from (line_x0, line_y0) to (line_x1, line_y1), x 0..255,
+\ y 0..254 (draw_line uses the rows' table to 255). Uses A, X, Y.
+.draw_line
+{
+    lda line_y1
+    sec
+    sbc line_y0
+    bcs ordered
+    ldx line_x0                 \ upwards: swap the ends
+    ldy line_x1
+    stx line_x1
+    sty line_x0
+    ldx line_y0
+    ldy line_y1
+    stx line_y1
+    sty line_y0
+    lda line_y1
+    sec
+    sbc line_y0
+.ordered
+    sta line_minor              \ dy, for now
+    ldx #0                      \ X = which loop, x 16
+    lda line_x1
+    sec
+    sbc line_x0
+    bcs right
+    eor #&FF                    \ |dx|
+    adc #1
+    ldx #16
+.right
+    cmp line_minor
+    bcs along_x
+    ldy line_minor              \ along y: major dy, minor dx
+    sta line_minor
+    sty line_major
+    txa
+    ora #32
+    tax
+    jmp lengths
+.along_x
+    sta line_major
+.lengths
+    lda line_x0                 \ the block for x0's bit
+    and #7
+    asl a
+    stx line_entry
+    ora line_entry
+    tax
+    lda line_entries, X
+    sta line_entry
+    lda line_entries + 1, X
+    sta line_entry + 1
+    ldx line_y0                 \ the row's address
+    lda ROW_LO, X
+    sta line_ptr
+    lda ROW_HI, X
+    clc
+    adc screen_add
+    sta line_ptr + 1
+    lda line_x0
+    and #&F8
+    tay                         \ Y = the byte in the row
+    ldx line_major
+    inx
+    stx line_count              \ major + 1 pixels (256 is 0)
+    lda line_major
+    lsr a
+    tax                         \ the error starts at half the major length
+    jmp (line_entry)
+}
+
+.line_entries
+    EQUW right_x7, right_x6, right_x5, right_x4, right_x3, right_x2, right_x1, right_x0
+    EQUW left_x7, left_x6, left_x5, left_x4, left_x3, left_x2, left_x1, left_x0
+    EQUW right_y7, right_y6, right_y5, right_y4, right_y3, right_y2, right_y1, right_y0
+    EQUW left_y7, left_y6, left_y5, left_y4, left_y3, left_y2, left_y1, left_y0
+
+.right_x7   ALONG_X 7, right_x6
+.right_x6   ALONG_X 6, right_x5
+.right_x5   ALONG_X 5, right_x4
+.right_x4   ALONG_X 4, right_x3
+.right_x3   ALONG_X 3, right_x2
+.right_x2   ALONG_X 2, right_x1
+.right_x1   ALONG_X 1, right_x0
+.right_x0   ALONG_X 0, right_x_byte
+.right_x_byte
+    tya
+    clc
+    adc #8
+    tay
+    jmp right_x7
+
+.left_x0    ALONG_X 0, left_x1
+.left_x1    ALONG_X 1, left_x2
+.left_x2    ALONG_X 2, left_x3
+.left_x3    ALONG_X 3, left_x4
+.left_x4    ALONG_X 4, left_x5
+.left_x5    ALONG_X 5, left_x6
+.left_x6    ALONG_X 6, left_x7
+.left_x7    ALONG_X 7, left_x_byte
+.left_x_byte
+    tya
+    sec
+    sbc #8
+    tay
+    jmp left_x0
+
+.right_y7   ALONG_Y 7, right_y7
+.right_y6   ALONG_Y 6, right_y6
+.right_y5   ALONG_Y 5, right_y5
+.right_y4   ALONG_Y 4, right_y4
+.right_y3   ALONG_Y 3, right_y3
+.right_y2   ALONG_Y 2, right_y2
+.right_y1   ALONG_Y 1, right_y1
+.right_y0   ALONG_Y 0, right_y0
+    tya
+    clc
+    adc #8
+    tay
+    jmp right_y7
+
+.left_y0    ALONG_Y 0, left_y0
+.left_y1    ALONG_Y 1, left_y1
+.left_y2    ALONG_Y 2, left_y2
+.left_y3    ALONG_Y 3, left_y3
+.left_y4    ALONG_Y 4, left_y4
+.left_y5    ALONG_Y 5, left_y5
+.left_y6    ALONG_Y 6, left_y6
+.left_y7    ALONG_Y 7, left_y7
+    tya
+    sec
+    sbc #8
+    tay
+    jmp left_y0
+
+
+\ ---------------------------------------------------------------------------
+\ clear_box: blank character rows A..A+X-1 (0..31, in the window), byte
+\ columns line_x0..line_x0+line_x1-1 (0..31). Each character row's part of a
+\ column is 8 bytes in a row, so a row's box is one run of bytes.
+\ Uses A, X, Y, line_ptr.
+
+.clear_box
+{
+    stx line_count
+    asl a
+    asl a
+    asl a
+    tax                         \ X = the first pixel row
+    lda line_x0
+    asl a
+    asl a
+    asl a
+    clc
+    adc ROW_LO, X               \ (line_x0 * 8 + the row's low byte)
+    sta line_ptr
+    lda ROW_HI, X
+    adc screen_add
+    sta line_ptr + 1
+    lda line_x1
+    asl a
+    asl a
+    asl a
+    sta line_major              \ bytes a row: 8..248, or 0 for 256
+.row
+    ldy line_major
+    lda #0
+    dey
+.byte
+    sta (line_ptr), Y
+    dey
+    bne byte
+    sta (line_ptr), Y
+    lda line_ptr
+    clc
+    adc #LO(320)
+    sta line_ptr
+    lda line_ptr + 1
+    adc #HI(320)
+    sta line_ptr + 1
+    dec line_count
+    bne row
     rts
 }

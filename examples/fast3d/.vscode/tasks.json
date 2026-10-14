@@ -1,0 +1,24 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "beebasm: fast3d",
+      "detail": "Assemble the demo to a bootable disc, with the symbols and listing the debugger reads, and the routines alone for check.mjs",
+      "type": "shell",
+      "command": "beebasm -i demo.6502 -do build/fast3d.ssd -boot DEMO -v -dd -labels build/demo.labels > build/demo.lst && beebasm -i checks.6502 -dd -labels build/checks.labels",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": {
+        "owner": "beebasm",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^(.*):(\\d+):\\s*(error|warning):\\s*(.*)$",
+          "file": 1,
+          "line": 2,
+          "severity": 3,
+          "message": 4
+        }
+      }
+    }
+  ]
+}

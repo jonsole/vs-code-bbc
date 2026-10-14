@@ -55,3 +55,49 @@ export function project([sx, sy, sz], zoff, centreX = 128, centreY = 127, height
     if (px < 0 || px > 255 || py < 0 || py >= height) return null;
     return [px, py];
 }
+
+/** The pixels draw_line sets: Bresenham, drawn downwards (the ends swapped if
+ * need be), stepping along the longer axis with the error starting at half of it. */
+export function line(x0, y0, x1, y1) {
+    if (y1 < y0) [x0, y0, x1, y1] = [x1, y1, x0, y0];
+    const dx = Math.abs(x1 - x0);
+    const dy = y1 - y0;
+    const sx = x1 >= x0 ? 1 : -1;
+    const pixels = [];
+    let [x, y] = [x0, y0];
+    if (dx >= dy) {
+        let err = dx >> 1;
+        for (let i = 0; i <= dx; i++) {
+            pixels.push([x, y]);
+            err -= dy;
+            if (err < 0) {
+                err += dx;
+                y++;
+            }
+            x += sx;
+        }
+    } else {
+        let err = dy >> 1;
+        for (let i = 0; i <= dy; i++) {
+            pixels.push([x, y]);
+            err -= dx;
+            if (err < 0) {
+                err += dy;
+                x += sx;
+            }
+            y++;
+        }
+    }
+    return pixels;
+}
+
+/** The byte of a MODE 4 screen at `base` holding window pixel (x, y): the
+ * window is the screen's middle 256 columns, 32 pixels in. */
+export const screenAddress = (x, y, base = 0x3000) => base + (y >> 3) * 320 + (y & 7) + ((x + 32) >> 3) * 8;
+
+/** A MODE 4 screen (10K) with these lines on it. */
+export function render(lines, base = 0x3000) {
+    const screen = new Uint8Array(10240);
+    for (const l of lines) for (const [x, y] of line(...l)) screen[screenAddress(x, y, base) - base] |= 0x80 >> (x & 7);
+    return screen;
+}
