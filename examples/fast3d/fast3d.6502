@@ -945,3 +945,619 @@ ENDMACRO
     bne row
     rts
 }
+
+
+\ ---------------------------------------------------------------------------
+\ Clipping lines to a window, and projecting to 16-bit screen coordinates so
+\ that there is something to clip. The ZX Spectrum's fast3d has the same;
+\ model.mjs has the arithmetic exactly.
+\
+\ project_wide is project without the edge of the screen: a vertex lands where
+\ it lands, up to WIDE_LIMIT pixels from the centre, as 16-bit x and y. It
+\ divides the quick way (divide_unsigned) whenever the quotient fits a byte,
+\ as it does for anything on the screen or near it.
+\
+\ clip_line is Cohen-Sutherland. Each end is given a code: which of the
+\ window's edges it is beyond. Both inside, the line is drawn as it is; both
+\ beyond the same edge, none of it is in the window; otherwise an end beyond
+\ an edge moves to where the line crosses that edge, and the ends are coded
+\ again. Every crossing is worked out from the line's own ends, never from an
+\ end already moved: a moved end has been rounded, and on a shallow line the
+\ slope would multiply that.
+\
+\ A crossing is found by halving (crossing_x for a left or right edge,
+\ crossing_y for a top or bottom): from one end, a step toward the other is
+\ halved again and again, and taken whenever the line stays short of the edge.
+\ Each halving is one bit of how far along the line the edge is -- a step of a
+\ division -- and adds that much of the line's other coordinate -- a step of a
+\ multiplication. It stops once the step is under half a pixel, about 12
+\ halvings, and each end of a clipped line is within 0.75 of a pixel of the
+\ true line.
+
+WIDE_LIMIT  = 16383             \ model.WIDE_LIMIT
+WIDE_BEHIND = &8000             \ transform_wide's x for a vertex at or behind the eye
+OFF_LEFT    = 1
+OFF_RIGHT   = 2
+OFF_TOP     = 4
+OFF_BOTTOM  = 8
+CHOP_BITS   = 7                 \ model.CHOP_BITS
+CHOP_HALF   = 1 << (CHOP_BITS - 1)
+
+\ Clipping never happens during rotate, project or transform, so it borrows
+\ their zero page: three-byte numbers, low byte first.
+chop_r      = rot_x             \ 3: b short of the edge (negative)
+chop_db     = rot_y + 1         \ 3: the step along b
+chop_da     = vx                \ 3: the step along a
+chop_gone   = pptr              \ 3: how far along a, so far, and half a pixel
+chop_n      = screen_x          \ halvings left
+clip_c0     = screen_y          \ the ends' codes
+clip_c1     = acc
+oc_code     = acc + 1
+div_sign    = acc               \ divide_wide's (never while clipping)
+div_hi      = vx
+
+\ The line to clip, 16-bit signed, low byte first: clip_x0, clip_y0,
+\ clip_x1, clip_y1; and the line as it was, while it is clipped.
+.clip_ends
+.clip_x0    SKIP 2
+.clip_y0    SKIP 2
+.clip_x1    SKIP 2
+.clip_y1    SKIP 2
+.clip_line_ends
+.clip_px    SKIP 2
+.clip_py    SKIP 2
+.clip_qx    SKIP 2
+.clip_qy    SKIP 2
+.clip_passes SKIP 1
+.clip_end   SKIP 1
+.chop_ap    SKIP 2
+.wide_x     SKIP 2              \ project_wide's results
+.wide_y     SKIP 2
+
+
+\ set_window: lines are clipped to columns line_x0..line_x1 and rows
+\ line_y0..line_y1, inclusive (y up to 254). Uses A. They go into outcode.
+.set_window
+    lda line_x0
+    sta outcode_left + 1
+    lda line_y0
+    sta outcode_top + 1
+    lda line_x1
+    sta outcode_right + 1
+    lda line_y1
+    sta outcode_bottom + 1
+    rts
+
+
+\ outcode: A = the edges the end at clip_ends + X (X = 0 or 4) is beyond.
+.outcode
+{
+    lda clip_ends + 1, X
+    bmi left                    \ x < 0
+    bne right                   \ x > 255
+    lda clip_ends, X
+.*outcode_left
+    cmp #0
+    bcc left
+.*outcode_right
+    lda #255
+    cmp clip_ends, X
+    bcs within
+.right
+    lda #OFF_RIGHT
+    bne y
+.left
+    lda #OFF_LEFT
+    bne y
+.within
+    lda #0
+.y
+    sta oc_code
+    lda clip_ends + 3, X
+    bmi top
+    bne bottom
+    lda clip_ends + 2, X
+.*outcode_top
+    cmp #0
+    bcc top
+.*outcode_bottom
+    lda #254
+    cmp clip_ends + 2, X
+    bcs done
+.bottom
+    lda #OFF_BOTTOM
+    ora oc_code
+    rts
+.top
+    lda #OFF_TOP
+    ora oc_code
+    rts
+.done
+    lda oc_code
+    rts
+}
+
+
+\ clip_line: the line (clip_x0, clip_y0)-(clip_x1, clip_y1) cut to the window.
+\ Carry set if none of it is in the window; else carry clear and line_x0,
+\ line_y0, line_x1, line_y1 the ends, as draw_line takes them. Uses A, X, Y.
+.clip_line
+{
+    ldx #0
+    jsr outcode
+    sta clip_c0
+    ldx #4
+    jsr outcode
+    sta clip_c1
+    ora clip_c0
+    beq inside                  \ both ends in the window
+    lda clip_c0
+    and clip_c1
+    bne outside                 \ both beyond one edge
+    ldx #7                      \ the line's own ends, kept for the crossings
+.keep
+    lda clip_ends, X
+    sta clip_line_ends, X
+    dex
+    bpl keep
+    lda #8
+    sta clip_passes
+    bne cut
+.outside
+    sec
+    rts
+.inside
+    lda clip_x0
+    sta line_x0
+    lda clip_y0
+    sta line_y0
+    lda clip_x1
+    sta line_x1
+    lda clip_y1
+    sta line_y1
+    clc
+    rts
+.again
+    ldx #0
+    jsr outcode
+    sta clip_c0
+    ldx #4
+    jsr outcode
+    sta clip_c1
+    ora clip_c0
+    beq inside
+    lda clip_c0
+    and clip_c1
+    bne outside
+    dec clip_passes
+    beq outside                 \ (never: see model.clipLine)
+.cut
+    ldx #0                      \ the first end, if it is out
+    lda clip_c0
+    bne this_end
+    ldx #4
+    lda clip_c1
+.this_end
+    stx clip_end
+    lsr a
+    bcs left
+    lsr a
+    bcs right
+    lsr a
+    bcs top
+    lda outcode_bottom + 1
+    jmp across
+.top
+    lda outcode_top + 1
+.across                         \ A = the edge's y: x is where the line crosses it
+    pha
+    jsr crossing_y
+    ldx clip_end
+    sta clip_ends, X
+    tya
+    sta clip_ends + 1, X
+    pla
+    sta clip_ends + 2, X
+    lda #0
+    sta clip_ends + 3, X
+    jmp again
+.right
+    lda outcode_right + 1
+    jmp down
+.left
+    lda outcode_left + 1
+.down                           \ A = the edge's x: y is where the line crosses it
+    pha
+    jsr crossing_x
+    ldx clip_end
+    sta clip_ends + 2, X
+    tya
+    sta clip_ends + 3, X
+    pla
+    sta clip_ends, X
+    lda #0
+    sta clip_ends + 1, X
+    jmp again
+}
+
+\ draw_line_clipped: clip_line, then draw_line what is left. Carry set if
+\ there was nothing to draw.
+.draw_line_clipped
+    jsr clip_line
+    bcs nothing_to_draw
+    jsr draw_line
+    clc
+.nothing_to_draw
+    rts
+
+
+\ crossing_x: A, Y = y (low, high) where the line (clip_px, clip_py)-(clip_qx,
+\ clip_qy) crosses x = A; crossing_y: x where it crosses y = A. The edge must
+\ lie between the ends. Uses A, X, Y.
+
+MACRO CROSSING b_p, b_q, a_p, a_q
+    sta chop_n                  \ (the edge, for a moment)
+    sec
+    lda b_p
+    sbc chop_n
+    sta chop_r
+    lda b_p + 1
+    sbc #0
+    sta chop_r + 1              \ b_p - edge
+    sec
+    lda b_q
+    sbc b_p
+    sta chop_db
+    lda b_q + 1
+    sbc b_p + 1
+    sta chop_db + 1             \ b_q - b_p
+    sec
+    lda a_q
+    sbc a_p
+    sta chop_da
+    lda a_q + 1
+    sbc a_p + 1
+    sta chop_da + 1             \ a_q - a_p
+    lda a_p
+    sta chop_ap
+    lda a_p + 1
+    sta chop_ap + 1
+    jmp chop
+ENDMACRO
+
+.crossing_x
+    CROSSING clip_px, clip_qx, clip_py, clip_qy
+.crossing_y
+    CROSSING clip_py, clip_qy, clip_px, clip_qx
+
+\ A 16-bit number, << CHOP_BITS, into three bytes in place.
+MACRO SCALE at
+    lda at + 1
+    cmp #&80                    \ (the sign into the carry)
+    ror a
+    sta at + 2
+    lda at
+    ror a
+    sta at + 1
+    lda #0
+    ror a
+    sta at
+ENDMACRO
+
+\ The halving. The steps start as 24-bit numbers, CHOP_BITS of them fraction,
+\ and halve once a round; the halvings are one more than the bits in the
+\ larger step, so after all but the last 9 everything fits 16 bits, and those
+\ 9 (or all of them, on a short line) are done in 16.
+.chop
+{
+    lda chop_db + 1             \ toward the edge, positive: from Q's side,
+    bpl toward                  \ flip b
+    sec
+    lda #0
+    sbc chop_db
+    sta chop_db
+    lda #0
+    sbc chop_db + 1
+    sta chop_db + 1
+    sec
+    lda #0
+    sbc chop_r
+    sta chop_r
+    lda #0
+    sbc chop_r + 1
+    sta chop_r + 1
+.toward
+    lda chop_da + 1             \ the halvings: the bits in |b_q - b_p| |
+    bpl da_size                 \ |a_q - a_p|, plus one
+    sec
+    lda #0
+    sbc chop_da
+    tax
+    lda #0
+    sbc chop_da + 1
+    jmp sized
+.da_size
+    ldx chop_da
+.sized                          \ A, X = |a_q - a_p|, high and low
+    ora chop_db + 1
+    beq low_byte
+    ldy #17
+    bne count
+.low_byte
+    txa
+    ora chop_db
+    ldy #9
+.count
+    asl a
+    bcs counted
+    dey
+    bne count
+.counted
+    sty chop_n
+    SCALE chop_r
+    SCALE chop_db
+    SCALE chop_da
+    lda #CHOP_HALF              \ half a pixel, for the rounding
+    sta chop_gone
+    lda #0
+    sta chop_gone + 1
+    sta chop_gone + 2
+    lda chop_n                  \ more than 9 halvings: the first in 24 bits
+    sec
+    sbc #9
+    bcc short_line
+    beq last_nine
+    sta chop_n
+
+.halve24
+    lsr chop_db + 2             \ the steps halved
+    ror chop_db + 1
+    ror chop_db
+    lda chop_da + 2
+    cmp #&80
+    ror chop_da + 2
+    ror chop_da + 1
+    ror chop_da
+    clc                         \ still short of the edge, after the step?
+    lda chop_r
+    adc chop_db
+    tax
+    lda chop_r + 1
+    adc chop_db + 1
+    tay
+    lda chop_r + 2
+    adc chop_db + 2
+    bpl stay24                  \ no: stay
+    sta chop_r + 2              \ yes: take it, along b
+    stx chop_r
+    sty chop_r + 1
+    clc                         \ and along a
+    lda chop_gone
+    adc chop_da
+    sta chop_gone
+    lda chop_gone + 1
+    adc chop_da + 1
+    sta chop_gone + 1
+    lda chop_gone + 2
+    adc chop_da + 2
+    sta chop_gone + 2
+.stay24
+    dec chop_n
+    bne halve24
+.last_nine
+    lda #9
+    bne halvings16
+.short_line
+    adc #9                      \ (carry clear)
+.halvings16
+    sta chop_n
+
+.halve16                        \ the same in 16 bits: chop_db + 2 is 0, and
+    lsr chop_db + 1             \ chop_r + 2 and chop_da + 2 all sign
+    ror chop_db
+    lda chop_da + 1
+    cmp #&80
+    ror chop_da + 1
+    ror chop_da
+    clc
+    lda chop_r
+    adc chop_db
+    tax
+    lda chop_r + 1
+    adc chop_db + 1
+    bpl stay16
+    sta chop_r + 1
+    stx chop_r
+    clc
+    lda chop_gone
+    adc chop_da
+    sta chop_gone
+    lda chop_gone + 1
+    adc chop_da + 1
+    sta chop_gone + 1
+    lda chop_gone + 2
+    adc chop_da + 2
+    sta chop_gone + 2
+.stay16
+    dec chop_n
+    bne halve16
+
+    lda chop_da + 2             \ a = a_p + (gone + half the last step)
+    cmp #&80                    \ >> CHOP_BITS
+    ror chop_da + 2
+    ror chop_da + 1
+    ror chop_da
+    clc
+    lda chop_gone
+    adc chop_da
+    sta chop_gone
+    lda chop_gone + 1
+    adc chop_da + 1
+    sta chop_gone + 1
+    lda chop_gone + 2
+    adc chop_da + 2
+    sta chop_gone + 2
+    asl chop_gone               \ << 1: the top two bytes are >> 7
+    rol chop_gone + 1
+    rol chop_gone + 2
+    clc
+    lda chop_gone + 1
+    adc chop_ap
+    tax
+    lda chop_gone + 2
+    adc chop_ap + 1
+    tay
+    txa
+    rts
+}
+
+
+\ divide_wide: div_lo:A = (A, div_lo) / div_by, signed 16-bit by unsigned
+\ byte, truncated toward zero and held to +-WIDE_LIMIT; low byte in div_lo,
+\ high in A. Uses X, div_sign, div_hi.
+.divide_wide
+{
+    sta div_sign
+    ora #0
+    bpl positive
+    jsr negate_div
+.positive
+    cmp div_by
+    bcs long
+    jsr divide_unsigned         \ the quotient fits a byte: the quick way
+    sta div_lo
+    lda #0
+    beq signed
+.long                           \ else 16 bits of quotient into div_lo, div_hi
+    sta div_hi
+    lda #0                      \ the remainder
+    ldx #16
+.bit
+    asl div_lo
+    rol div_hi
+    rol a
+    bcs subtract                \ past 255: at least div_by
+    cmp div_by
+    bcc next
+.subtract
+    sbc div_by
+    inc div_lo
+.next
+    dex
+    bne bit
+    lda div_hi
+    cmp #HI(WIDE_LIMIT) + 1     \ held to the limit
+    bcc signed
+    lda #LO(WIDE_LIMIT)
+    sta div_lo
+    lda #HI(WIDE_LIMIT)
+.signed
+    bit div_sign
+    bpl done
+    jsr negate_div
+.done
+    rts
+}
+
+\ A, div_lo = -(A, div_lo). Uses X.
+.negate_div
+    eor #&FF
+    tax
+    lda div_lo
+    eor #&FF
+    clc
+    adc #1
+    sta div_lo
+    txa
+    adc #0
+    rts
+
+
+\ project_wide: where the rotated vertex lands, on the screen or off it.
+\ In: rot_x, rot_y, rot_z, zoff. Out: wide_x, wide_y (16-bit signed, y
+\ downwards), carry clear -- or carry set if Z is 0. Uses A, X.
+.project_wide
+{
+    clc
+    lda rot_z
+    adc zoff
+    lda rot_z + 1
+    adc zoff + 1
+    bne in_front
+    sec                         \ Z = 0: at or behind the eye
+    rts
+.in_front
+    sta div_by
+    lda rot_y
+    sta div_lo
+    lda rot_y + 1
+    jsr divide_wide
+    sta wide_y + 1              \ y = centre - rot_y / Z
+    sec
+    lda #SCREEN_CENTRE_Y
+    sbc div_lo
+    sta wide_y
+    lda #0
+    sbc wide_y + 1
+    sta wide_y + 1
+    lda rot_x
+    sta div_lo
+    lda rot_x + 1
+    jsr divide_wide
+    tax                         \ x = centre + rot_x / Z
+    clc
+    lda div_lo
+    adc #SCREEN_CENTRE_X
+    sta wide_x
+    txa
+    adc #0
+    sta wide_x + 1
+    clc
+    rts
+}
+
+
+\ transform_wide: transform, to 16-bit points: x then y, four bytes a
+\ vertex, low bytes first; a vertex at or behind the eye gets x =
+\ WIDE_BEHIND. In: vptr, pptr, count as transform. Uses A, X, Y.
+.transform_wide
+{
+.next
+    jsr rotate
+    lda vptr
+    clc
+    adc #3
+    sta vptr
+    bcc same_page
+    inc vptr + 1
+.same_page
+    jsr project_wide
+    bcc store
+    lda #LO(WIDE_BEHIND)
+    sta wide_x
+    lda #HI(WIDE_BEHIND)
+    sta wide_x + 1
+.store
+    ldy #0
+    lda wide_x
+    sta (pptr), Y
+    iny
+    lda wide_x + 1
+    sta (pptr), Y
+    iny
+    lda wide_y
+    sta (pptr), Y
+    iny
+    lda wide_y + 1
+    sta (pptr), Y
+    lda pptr
+    clc
+    adc #4
+    sta pptr
+    bcc same_page_2
+    inc pptr + 1
+.same_page_2
+    dec count
+    bne next
+    rts
+}

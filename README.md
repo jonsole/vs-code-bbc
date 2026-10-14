@@ -80,8 +80,8 @@ instead of a second one.
 
 [examples/fast3d](examples/fast3d/README.md) is a bigger example: fast 6502
 routines for 3D graphics (multiplication by quarter squares, a rotation
-matrix, rotating, projecting, drawing lines), each checked against a model,
-and a demo of a wireframe turning in MODE 4.
+matrix, rotating, projecting, drawing lines, clipping them to a window),
+each checked against a model, and a demo of a wireframe turning in MODE 4.
 
 Right-click a `.ssd`, `.dsd`, `.uef` or `.bas` file in the Explorer to run or
 debug it without a launch configuration.

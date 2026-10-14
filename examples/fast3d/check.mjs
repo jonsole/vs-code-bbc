@@ -12,10 +12,16 @@
 // 5. draw_line, every byte of the 10K screen after each batch of lines,
 //    against model.line, on lines every way and length and on both screens
 //    (&3000 and &5800); and clear_box.
-// 6. The demo (DEMO, from build/fast3d.ssd): draw_frame, frame after frame
-//    for each object, on the screen at &3000 (so clearing its own last box),
-//    against the model's picture of the same frame; and timed. A frame goes
-//    to demo.png.
+// 6. Clipping: divide_wide, project_wide and transform_wide against the
+//    model; clip_line on 60,000 lines across random windows, from inside the
+//    window to 16,000 pixels out, every end; and draw_line_clipped, every
+//    pixel. (The model is the Spectrum's, which clip_geometry.py there holds
+//    to exact geometry.)
+// 7. The demo (DEMO, from build/fast3d.ssd): demo_setup, then draw_frame,
+//    frame after frame for each object through a whole swing in and out, on
+//    the screen at &3000 (so clearing its own last box), against the model's
+//    picture of the same frame -- clipped to the window, frame and all; and
+//    timed. A frame goes to demo.png.
 //
 // The cycles come from the CPU's own count, page crossings and all.
 //
@@ -299,6 +305,125 @@ function checkLines(m, failures) {
     report("clear_box", clearTimes);
 }
 
+/** [window, line] pairs: random windows, and lines from inside them to far out, half aimed through the window. */
+function windowLines(rnd, count) {
+    const cases = [];
+    const between = (lo, hi) => lo + rnd(hi - lo + 1);
+    for (let i = 0; i < count; i++) {
+        let a = rnd(256);
+        let b = rnd(256);
+        while (b === a) b = rnd(256);
+        let c = rnd(255);
+        let d = rnd(255);
+        while (d === c) d = rnd(255);
+        const window = [Math.min(a, b), Math.min(c, d), Math.max(a, b), Math.max(c, d)];
+        const far = [40, 300, 2000, 16000][rnd(4)];
+        const line = [between(-far, far + 255), between(-far, far + 254), between(-far, far + 255), between(-far, far + 254)];
+        if (rnd(2)) {
+            line[2] = 2 * between(window[0], window[2]) - line[0];
+            line[3] = 2 * between(window[1], window[3]) - line[1];
+        }
+        cases.push([window, line]);
+    }
+    return cases;
+}
+
+const words = (values) => values.flatMap((v) => [v & 0xff, (v >> 8) & 0xff]);
+
+function checkClipping(m, failures) {
+    const rnd = random(8);
+    const signed16 = (v) => (v & 0x8000 ? v - 0x10000 : v);
+    const word = (address) => signed16(m.peek(address) | (m.peek(address + 1) << 8));
+
+    let times = [];
+    for (let i = 0; i < 20000; i++) {
+        const n = rnd(65536) - 32768;
+        const c = rnd(10) < 3 ? 1 + rnd(7) : 1 + rnd(255);
+        m.poke(m.zp("div_lo"), [n & 0xff, c]);
+        times.push(m.call("divide_wide", { a: (n >> 8) & 0xff }));
+        const got = signed16((m.cpu.a << 8) | m.peek(m.zp("div_lo")));
+        const want = model.divideWide(n, c);
+        if (got !== want && failures.length < 10) failures.push(`divide_wide ${n} / ${c}: ${got}, not ${want}`);
+    }
+    report("divide_wide", times);
+
+    times = [];
+    for (let i = 0; i < 20000; i++) {
+        const rotated = [0, 1, 2].map(() => rnd(57345) - 28672);
+        const zoff = rnd(65536);
+        if (rotated[2] + zoff < 0 || rotated[2] + zoff >= 65536) continue;
+        ["rot_x", "rot_y", "rot_z"].forEach((n, k) => m.poke(m.zp(n), [rotated[k] & 0xff, (rotated[k] >> 8) & 0xff]));
+        m.poke(m.zp("zoff"), [zoff & 0xff, zoff >> 8]);
+        times.push(m.call("project_wide"));
+        const got = m.cpu.p.c ? null : [word(m.labels.wide_x), word(m.labels.wide_y)];
+        const want = model.projectWide(rotated, zoff);
+        if (String(got) !== String(want) && failures.length < 10) failures.push(`project_wide ${rotated} zoff ${zoff}: ${got}, not ${want}`);
+    }
+    report("project_wide", times);
+
+    // transform_wide, close enough that points land far off the screen
+    const vertexAt = m.labels.checks_vertices;
+    const pointAt = m.labels.checks_points;
+    for (let round = 0; round < 200; round++) {
+        const [x, y, z] = [rnd(256), rnd(256), rnd(256)];
+        m.poke(m.zp("angle_x"), [x, y, z]);
+        m.call("make_matrix");
+        const matrix = model.makeMatrix(x, y, z);
+        const zoff = 28800 + rnd(7200);
+        m.poke(m.zp("zoff"), [zoff & 0xff, zoff >> 8]);
+        const vertices = [];
+        for (let i = 0; i < 8; i++) vertices.push([rnd(256) - 128, rnd(256) - 128, rnd(256) - 128]);
+        m.poke(vertexAt, vertices.flat());
+        m.poke(m.zp("vptr"), [vertexAt & 0xff, vertexAt >> 8]);
+        m.poke(m.zp("pptr"), [pointAt & 0xff, pointAt >> 8]);
+        m.poke(m.zp("count"), [8]);
+        m.call("transform_wide");
+        vertices.forEach((vertex, i) => {
+            const want = model.projectWide(model.rotate(matrix, vertex), zoff);
+            const xy = [word(pointAt + 4 * i), word(pointAt + 4 * i + 2)];
+            const got = xy[0] === -32768 ? null : xy;
+            if (String(got) !== String(want) && failures.length < 10) failures.push(`transform_wide ${vertex} at ${x},${y},${z}: ${got}, not ${want}`);
+        });
+    }
+
+    const kinds = { inside: [], outside: [], "clipped once": [], "clipped twice or more": [] };
+    const setWindow = (window) => {
+        m.poke(m.zp("rot_x"), window.slice(0, 2)); // line_x0, line_y0
+        m.poke(m.zp("rot_y"), window.slice(2, 4)); // line_x1, line_y1
+        m.call("set_window");
+    };
+    for (const [window, line] of windowLines(rnd, 60000)) {
+        setWindow(window);
+        m.poke(m.labels.clip_x0, words(line));
+        const t = m.call("clip_line");
+        const got = m.cpu.p.c ? null : [0, 1, 2, 3].map((k) => m.peek(m.zp("rot_x") + k));
+        const want = model.clipLine(...line, window);
+        if (String(got) !== String(want) && failures.length < 10) failures.push(`clip_line ${line} to ${window}: ${got}, not ${want}`);
+        if (want === null) kinds.outside.push(t);
+        else {
+            const firstKept = want[0] === line[0] && want[1] === line[1];
+            const secondKept = want[2] === line[2] && want[3] === line[3];
+            kinds[firstKept && secondKept ? "inside" : firstKept || secondKept ? "clipped once" : "clipped twice or more"].push(t);
+        }
+    }
+    for (const [kind, ts] of Object.entries(kinds)) report(`clip_line, ${kind}`, ts);
+
+    // draw_line_clipped: the pixels
+    m.poke(m.zp("screen_add"), [0]);
+    for (const [window, line] of windowLines(rnd, 2000)) {
+        m.poke(0x3000, new Array(10240).fill(0));
+        setWindow(window);
+        m.poke(m.labels.clip_x0, words(line));
+        m.call("draw_line_clipped");
+        const clipped = model.clipLine(...line, window);
+        if (!sameBytes(screenBytes(m, 0x3000), model.render(clipped ? [clipped] : [], 0x3000))) {
+            failures.push(`draw_line_clipped ${line} to ${window} differs from the model`);
+            break;
+        }
+    }
+    setWindow([0, 0, 255, 254]);
+}
+
 /** A file from a DFS disc image: [load address, bytes]. */
 export function ssdFile(ssd, name) {
     for (let i = 8; i < 8 + ssd[0x105]; i += 8) {
@@ -332,34 +457,48 @@ async function checkDemo(failures, picture) {
     m.labels = readLabels(path.join(Build, "demo.labels"));
     const [, image] = ssdFile(fs.readFileSync(path.join(Build, "fast3d.ssd")), "DEMO");
     m.poke(0x0e00, [...image]); // assembled to run at &0E00, where it copies itself
-    const distance = 400;
-    m.poke(m.zp("zoff"), [(distance * 128) & 0xff, (distance * 128) >> 8]);
-    m.poke(m.zp("screen_add"), [0]);
-    m.poke(m.zp("angle_x"), [0, 0, 0]);
+    // the demo's window (demo.6502's CLIP_*), and its frame a pixel outside
+    const [left, top, right, bottom] = [24, 24, 231, 231];
+    const window = [left, top, right, bottom];
+    const frameLines = [[left - 1, top - 1, right + 1, top - 1], [right + 1, top - 1, right + 1, bottom + 1],
+        [right + 1, bottom + 1, left - 1, bottom + 1], [left - 1, bottom + 1, left - 1, top - 1]];
     m.poke(0x3000, new Array(10240).fill(0));
+    m.poke(0x5800, new Array(10240).fill(0));
+    m.call("demo_setup"); // as start does, without the OS
+    m.poke(m.zp("angle_x"), [0, 0, 0]);
+    const swing = 290; // frames in from 400 units to 110 and out again
     const frames = [];
     for (const [index, { name, vertices, edges }] of readObjects().entries()) {
         const pointer = m.labels.objects + 6 * index;
         m.poke(0x8a, [pointer & 0xff, pointer >> 8]); // the demo's `object`
         const times = [];
-        for (let i = 0; i < 64; i++) {
+        let clipped = 0;
+        for (let i = 0; i < swing; i++) {
             times.push(m.call("draw_frame"));
             const angles = [0, 1, 2].map((a) => m.peek(m.zp("angle_x") + a));
+            const zoff = m.peek(m.zp("zoff")) | (m.peek(m.zp("zoff") + 1) << 8);
             const matrix = model.makeMatrix(...angles);
-            const points = vertices.map((v) => model.project(model.rotate(matrix, v), distance * 128));
-            const lines = edges.filter(([a, b]) => points[a] && points[b]).map(([a, b]) => [...points[a], ...points[b]]);
+            const points = vertices.map((v) => model.projectWide(model.rotate(matrix, v), zoff));
+            const lines = [...frameLines];
+            for (const [a, b] of edges) {
+                if (!points[a] || !points[b]) continue;
+                const line = model.clipLine(...points[a], ...points[b], window);
+                if (String(line) !== String([...points[a], ...points[b]])) clipped++;
+                if (line) lines.push(line);
+            }
             const got = screenBytes(m, 0x3000);
             if (!sameBytes(got, model.render(lines, 0x3000))) {
-                failures.push(`demo: the ${name} at angles ${angles} differs from the model`);
+                failures.push(`demo: the ${name} at angles ${angles}, zoff ${zoff}, differs from the model`);
                 break;
             }
             frames.push(got);
         }
         report(`demo: ${name}`, times);
+        console.log(`  ${"".padEnd(14)} (${clipped.toLocaleString()} of its ${(edges.length * swing).toLocaleString()} edges clipped, over a swing in and out)`);
     }
     if (!picture) return;
     // a frame as the BBC shows it: white on black, the whole 320 x 256
-    const frame = frames[20];
+    const frame = frames[60];
     const rgba = new Uint8Array(320 * 256 * 4);
     for (let y = 0; y < 256; y++) {
         for (let x = 0; x < 320; x++) {
@@ -376,7 +515,7 @@ export async function runChecks({ picture } = {}) {
     const m = await Machine.create();
     const failures = [];
     checkTables(m, failures);
-    for (const check of [checkMul8s, checkMatrixAndRotate, checkDivide, checkTransform, checkLines]) check(m, failures);
+    for (const check of [checkMul8s, checkMatrixAndRotate, checkDivide, checkTransform, checkLines, checkClipping]) check(m, failures);
     await checkDemo(failures, picture);
     return failures;
 }

@@ -101,3 +101,78 @@ export function render(lines, base = 0x3000) {
     for (const l of lines) for (const [x, y] of line(...l)) screen[screenAddress(x, y, base) - base] |= 0x80 >> (x & 7);
     return screen;
 }
+
+// ---------------------------------------------------------------------------
+// Clipping: projected points as 16-bit screen coordinates, on the screen or
+// not, and lines cut to a window. The ZX Spectrum's model.py has the same,
+// and clip_geometry.py there holds it to exact geometry.
+
+export const WIDE_LIMIT = 16383; // the most a wide projection moves from the centre
+
+/** S / Z, truncated toward zero, held to +-WIDE_LIMIT. */
+export function divideWide(s, z) {
+    const q = Math.min(Math.floor(Math.abs(s) / z), WIDE_LIMIT);
+    return s < 0 ? -q : q;
+}
+
+/** Where a rotated vertex lands, on the screen or off it, as 16-bit coordinates; null if Z is 0. */
+export function projectWide([sx, sy, sz], zoff, centreX = 128, centreY = 127) {
+    const z = (sz + zoff) >> 8;
+    if (z < 1 || z > 255) return null;
+    return [centreX + divideWide(sx, z), centreY - divideWide(sy, z)];
+}
+
+export const LEFT = 1;
+export const RIGHT = 2;
+export const TOP = 4;
+export const BOTTOM = 8;
+
+export function outcode(x, y, [left, top, right, bottom]) {
+    return (x < left ? LEFT : x > right ? RIGHT : 0) | (y < top ? TOP : y > bottom ? BOTTOM : 0);
+}
+
+export const CHOP_BITS = 7; // the fraction bits crossing keeps
+const CHOP_HALF = 1 << (CHOP_BITS - 1);
+
+const bitLength = (v) => (v === 0 ? 0 : 32 - Math.clz32(v));
+
+/** a where the line from (aP, bP) to (aQ, bQ) crosses b = edge, by halving -- a binary chop. */
+export function crossing(aP, aQ, bP, bQ, edge) {
+    const sign = bQ > bP ? 1 : -1;
+    let r = sign * (bP - edge) * (1 << CHOP_BITS); // <= 0: how far short of the edge
+    let db = Math.abs(bQ - bP) * (1 << CHOP_BITS); // the step along b
+    let da = (aQ - aP) * (1 << CHOP_BITS); // and along a
+    let gone = 0;
+    const halvings = bitLength(Math.abs(bQ - bP) | Math.abs(aQ - aP)) + 1;
+    for (let i = 0; i < halvings; i++) {
+        db >>= 1;
+        da >>= 1; // (floor: an arithmetic shift)
+        if (r + db < 0) {
+            r += db;
+            gone += da;
+        }
+    }
+    return aP + ((gone + (da >> 1) + CHOP_HALF) >> CHOP_BITS);
+}
+
+/** Cohen-Sutherland: the line cut to the window [left, top, right, bottom] (inclusive), or null. */
+export function clipLine(x0, y0, x1, y1, window) {
+    const [left, top, right, bottom] = window;
+    const [px, py, qx, qy] = [x0, y0, x1, y1]; // the line itself
+    for (let pass = 0; pass < 8; pass++) {
+        const c0 = outcode(x0, y0, window);
+        const c1 = outcode(x1, y1, window);
+        if (!(c0 | c1)) return [x0, y0, x1, y1];
+        if (c0 & c1) return null;
+        const code = c0 || c1;
+        let x;
+        let y;
+        if (code & LEFT) [x, y] = [left, crossing(py, qy, px, qx, left)];
+        else if (code & RIGHT) [x, y] = [right, crossing(py, qy, px, qx, right)];
+        else if (code & TOP) [x, y] = [crossing(px, qx, py, qy, top), top];
+        else [x, y] = [crossing(px, qx, py, qy, bottom), bottom];
+        if (c0) [x0, y0] = [x, y];
+        else [x1, y1] = [x, y];
+    }
+    return null;
+}

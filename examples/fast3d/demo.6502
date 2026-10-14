@@ -1,5 +1,7 @@
 \ demo.6502 -- fast3d's demo: a wireframe cube or icosahedron, turning about
-\ all three axes, in MODE 4. SPACE changes the object.
+\ all three axes and swinging in towards the eye and out again, in MODE 4,
+\ drawn through a window: whatever of it is beyond the window's frame is
+\ clipped away. SPACE changes the object.
 \
 \ Build: beebasm -i demo.6502 -do build/fast3d.ssd -boot DEMO -v -dd -labels build/demo.labels > build/demo.lst
 \ (from this directory)
@@ -26,17 +28,21 @@ SCREEN_A = &3000                \ the second screen; MODE 4's own is SCREEN_B
 SCREEN_B = &5800
 LOAD_AT = &1900
 RUN_AT = &0E00
-DISTANCE = 400                  \ the eye from the object's centre
+NEAREST = 110                   \ the eye from the object's centre, at its
+FARTHEST = 400                  \ closest and farthest
+CLIP_LEFT = 24                  \ the window lines are clipped to. clear_box
+CLIP_TOP = 24                   \ clears whole character rows and byte
+CLIP_RIGHT = 231                \ columns, so the window keeps to them, and
+CLIP_BOTTOM = 231               \ its frame, a pixel outside, is never cleared
 
 ORG RUN_AT
 GUARD SCREEN_A
 
 INCLUDE "fast3d.6502"     \ first: BeebAsm needs its zero page defined before use
 
-\ draw_frame borrows fast3d's zero page while its routines are idle.
-edge_ptr = div_lo               \ 2: draw_line does not divide
+\ draw_frame borrows fast3d's zero page that clip_line and draw_line leave be.
+edge_ptr = div_lo               \ 2
 edges_left = vptr
-extent = rot_x                  \ 4: the least x, most x, least y, most y
 
 .start
 {
@@ -65,12 +71,8 @@ extent = rot_x                  \ 4: the least x, most x, least y, most y
     inc line_ptr + 1
     dex
     bne blank
-    lda #LO(DISTANCE * 128)
-    sta zoff
-    lda #HI(DISTANCE * 128)
-    sta zoff + 1
-    lda #0                      \ MODE 4 shows &5800: draw on &3000 first
-    sta screen_add
+    jsr demo_setup
+    lda #0
     sta space_was
     lda #LO(objects)
     sta object
@@ -110,8 +112,78 @@ extent = rot_x                  \ 4: the least x, most x, least y, most y
 }
 
 
-\ draw_frame: turn the object on, and draw it on the screen screen_add says,
-\ clearing what it drew there last time. Calls nothing in the OS.
+\ demo_setup: the window, its frame on both screens, the object at its
+\ farthest, and &3000 to be drawn on first. Calls nothing in the OS.
+.demo_setup
+{
+    lda #CLIP_LEFT
+    sta line_x0
+    lda #CLIP_TOP
+    sta line_y0
+    lda #CLIP_RIGHT
+    sta line_x1
+    lda #CLIP_BOTTOM
+    sta line_y1
+    jsr set_window
+    lda #HI(SCREEN_B - SCREEN_A)
+    sta screen_add
+    jsr draw_frame_lines
+    lda #0
+    sta screen_add
+    jsr draw_frame_lines
+    lda #LO(FARTHEST * 128)
+    sta zoff
+    lda #HI(FARTHEST * 128)
+    sta zoff + 1
+    lda #LO(-256)               \ 2 units a frame, inwards first
+    sta swing
+    lda #HI(-256)
+    sta swing + 1
+    rts
+}
+
+\ draw_frame_lines: the window's frame, a pixel outside it, on the screen
+\ screen_add says.
+.draw_frame_lines
+{
+    ldx #0
+.line
+    lda frame_lines, X
+    sta line_x0
+    lda frame_lines + 1, X
+    sta line_y0
+    lda frame_lines + 2, X
+    sta line_x1
+    lda frame_lines + 3, X
+    sta line_y1
+    stx frame_at
+    jsr draw_line
+    lda frame_at
+    clc
+    adc #4
+    tax
+    cpx #16
+    bne line
+    rts
+.frame_at
+    EQUB 0
+}
+
+.frame_lines
+    EQUB CLIP_LEFT - 1, CLIP_TOP - 1, CLIP_RIGHT + 1, CLIP_TOP - 1
+    EQUB CLIP_RIGHT + 1, CLIP_TOP - 1, CLIP_RIGHT + 1, CLIP_BOTTOM + 1
+    EQUB CLIP_RIGHT + 1, CLIP_BOTTOM + 1, CLIP_LEFT - 1, CLIP_BOTTOM + 1
+    EQUB CLIP_LEFT - 1, CLIP_BOTTOM + 1, CLIP_LEFT - 1, CLIP_TOP - 1
+
+.swing
+    EQUW 0
+.extent
+    SKIP 4                      \ the least x, most x, least y, most y drawn
+
+
+\ draw_frame: turn the object on and swing it in or out, and draw it on the
+\ screen screen_add says, clipped to the window, clearing what it drew there
+\ last time. Calls nothing in the OS.
 .draw_frame
 {
     inc angle_x                 \ turn a little about each axis
@@ -120,7 +192,31 @@ extent = rot_x                  \ 4: the least x, most x, least y, most y
     inc angle_z
     jsr make_matrix
 
-    ldy #0                      \ the vertices to the screen
+    clc                         \ and swing in or out: 2 units a frame,
+    lda zoff                    \ turning at the ends
+    adc swing
+    sta zoff
+    lda zoff + 1
+    adc swing + 1
+    sta zoff + 1
+    lda zoff                    \ (both ends are whole multiples of 256)
+    bne swung
+    lda zoff + 1
+    cmp #HI(NEAREST * 128)
+    beq turn
+    cmp #HI(FARTHEST * 128)
+    bne swung
+.turn
+    sec
+    lda #0
+    sbc swing
+    sta swing
+    lda #0
+    sbc swing + 1
+    sta swing + 1
+.swung
+
+    ldy #0                      \ the vertices to the screen, on it or off it
     lda (object), Y
     sta vptr
     iny
@@ -133,7 +229,7 @@ extent = rot_x                  \ 4: the least x, most x, least y, most y
     sta pptr
     lda #HI(points)
     sta pptr + 1
-    jsr transform
+    jsr transform_wide
 
     ldx #0                      \ clear the last box here
     lda screen_add
@@ -155,7 +251,14 @@ extent = rot_x                  \ 4: the least x, most x, least y, most y
     jsr clear_box
 .cleared
 
-    ldy #3                      \ the edges
+    lda #&FF                    \ this screen's box, for next time: round every
+    sta extent                  \ end drawn
+    sta extent + 2
+    lda #0
+    sta extent + 1
+    sta extent + 3
+
+    ldy #3                      \ the edges, clipped
     lda (object), Y
     sta edge_ptr
     iny
@@ -166,26 +269,53 @@ extent = rot_x                  \ 4: the least x, most x, least y, most y
     sta edges_left
 .edge
     ldy #0
-    lda (edge_ptr), Y
+    lda (edge_ptr), Y           \ the first end into clip_x0, clip_y0
+    asl a
     asl a
     tax
-    lda points, X
-    sta line_x0
     lda points + 1, X
-    sta line_y0
+    cmp #HI(WIDE_BEHIND)
+    bne first_in_front
+    lda points, X
+    beq next                    \ at or behind the eye: leave the edge out
+.first_in_front
+    lda points, X
+    sta clip_x0
+    lda points + 1, X
+    sta clip_x0 + 1
+    lda points + 2, X
+    sta clip_y0
+    lda points + 3, X
+    sta clip_y0 + 1
     iny
-    lda (edge_ptr), Y
+    lda (edge_ptr), Y           \ the second into clip_x1, clip_y1
+    asl a
     asl a
     tax
-    lda points, X
-    sta line_x1
     lda points + 1, X
-    sta line_y1
-    cmp #&FF                    \ either end off the screen: leave it out
+    cmp #HI(WIDE_BEHIND)
+    bne second_in_front
+    lda points, X
     beq next
+.second_in_front
+    lda points, X
+    sta clip_x1
+    lda points + 1, X
+    sta clip_x1 + 1
+    lda points + 2, X
+    sta clip_y1
+    lda points + 3, X
+    sta clip_y1 + 1
+    jsr clip_line
+    bcs next                    \ none of it in the window
+    lda line_x0                 \ round its ends
+    jsr least_x
+    lda line_x1
+    jsr least_x
     lda line_y0
-    cmp #&FF
-    beq next
+    jsr least_y
+    lda line_y1
+    jsr least_y
     jsr draw_line
 .next
     lda edge_ptr
@@ -198,44 +328,7 @@ extent = rot_x                  \ 4: the least x, most x, least y, most y
     dec edges_left
     bne edge
 
-    \ this screen's box, for next time: round the points on it
-    lda #&FF
-    sta extent                  \ least x
-    sta extent + 2              \ least y
-    lda #0
-    sta extent + 1              \ most x
-    sta extent + 3              \ most y
-    ldy #2
-    lda (object), Y
-    asl a
-    tay                         \ Y = 2 * vertices
-.point
-    dey
-    lda points, Y               \ y
-    cmp #&FF
-    beq off
-    cmp extent + 2
-    bcs not_least_y
-    sta extent + 2
-.not_least_y
-    cmp extent + 3
-    bcc not_most_y
-    sta extent + 3
-.not_most_y
-    lda points - 1, Y           \ x
-    cmp extent
-    bcs not_least_x
-    sta extent
-.not_least_x
-    cmp extent + 1
-    bcc not_most_x
-    sta extent + 1
-.not_most_x
-.off
-    dey
-    bne point
-
-    ldx #0
+    ldx #0                      \ the box, in character rows and byte columns
     lda screen_add
     beq that_box
     ldx #4
@@ -243,7 +336,7 @@ extent = rot_x                  \ 4: the least x, most x, least y, most y
     lda extent + 2
     cmp #&FF
     bne some
-    lda #0                      \ nothing on the screen
+    lda #0                      \ nothing drawn
     sta boxes, X
     rts
 .some
@@ -274,6 +367,28 @@ extent = rot_x                  \ 4: the least x, most x, least y, most y
     clc
     adc #1
     sta boxes + 3, X
+    rts
+
+\ extent, extent + 1 = the least and most of them and A; and for y, + 2, + 3.
+.least_x
+    cmp extent
+    bcs not_least_x
+    sta extent
+.not_least_x
+    cmp extent + 1
+    bcc not_most_x
+    sta extent + 1
+.not_most_x
+    rts
+.least_y
+    cmp extent + 2
+    bcs not_least_y
+    sta extent + 2
+.not_least_y
+    cmp extent + 3
+    bcc not_most_y
+    sta extent + 3
+.not_most_y
     rts
 }
 
@@ -327,7 +442,7 @@ ASSERT HI(objects) = HI(objects_end)    \ read_space steps the low byte alone
 INCLUDE "objects.6502"
 
 .points
-    SKIP 2 * 128                \ x, y for each vertex
+    SKIP 4 * 64                 \ x, y (16-bit) for each vertex
 
 \ Where DEMO lands, it copies itself to RUN_AT and starts. Only relative
 \ branches and zero page here, so it runs wherever it was loaded.
