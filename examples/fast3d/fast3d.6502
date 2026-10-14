@@ -1,0 +1,947 @@
+\ fast3d.6502 -- fast 3D for the 6502, for BeebAsm: signed multiplication, a
+\ rotation matrix from three angles, rotating and projecting vertices, and
+\ drawing lines on a MODE 4 screen.
+\
+\ INCLUDE it anywhere in a program, before code that uses its zero page. It
+\ aligns its tables itself (2.5K, on page boundaries) and uses 26 bytes of
+\ zero page from FAST3D_ZP: &70 unless the program sets it first (or
+\ beebasm -D FAST3D_ZP=...).
+\
+\ Numbers, the same as the ZX Spectrum's fast3d (model.mjs has them exactly):
+\ - an angle is a byte, 256 to the turn;
+\ - a vertex is three signed bytes, -128..127;
+\ - a matrix entry is a signed byte, -127..127, with 127 for 1.0;
+\ - a rotated coordinate is the exact 16-bit sum m0*x + m1*y + m2*z: 128 times
+\   the rotated vertex's (times 127/128);
+\ - projected, it is rot / Z with Z = (rot_z + zoff) DIV 256: with zoff = 128 d,
+\   256 x / (z + d), an eye d units from the object and 256 from the screen.
+
+FAST3D_ZP =? &70
+
+acc         = FAST3D_ZP + 0     \ 2: make_matrix's sum, rotate's first products
+rot_x       = FAST3D_ZP + 2     \ 2: rotate's results
+rot_y       = FAST3D_ZP + 4     \ 2
+rot_z       = FAST3D_ZP + 6     \ 2
+zoff        = FAST3D_ZP + 8     \ 2: 128 * the eye's distance from the object
+vx          = FAST3D_ZP + 10    \ the vertex being rotated, each + 128
+vy          = FAST3D_ZP + 11
+vz          = FAST3D_ZP + 12
+angle_x     = FAST3D_ZP + 13    \ make_matrix's angles
+angle_y     = FAST3D_ZP + 14
+angle_z     = FAST3D_ZP + 15
+div_lo      = FAST3D_ZP + 16    \ divide's dividend's low byte, then the quotient
+div_by      = FAST3D_ZP + 17    \ and its divisor
+vptr        = FAST3D_ZP + 18    \ 2: -> the vertex rotate reads
+pptr        = FAST3D_ZP + 20    \ 2: -> where transform puts the next point
+count       = FAST3D_ZP + 22    \ transform's vertices still to do
+screen_x    = FAST3D_ZP + 23    \ project's results
+screen_y    = FAST3D_ZP + 24
+
+SCREEN_CENTRE_X = 128           \ the screen project lands on: 256 wide,
+SCREEN_CENTRE_Y = 127           \ 255 high, y downwards
+SCREEN_HEIGHT   = 255
+
+
+\ ---------------------------------------------------------------------------
+\ The tables.
+\
+\ SQ_LO, SQ_HI: floor(n*n/4) for n = -256..255, the quarter squares, at
+\ SQ_LO + 256 + n: a*b = f(a+b) - f(a-b).
+\ SINE_LO, SINE_HI: round(2032 * sin(2 pi a / 256)), twice round, so that a
+\ quarter or half a turn more is only a different base address.
+
+ALIGN &100
+.SQ_LO
+FOR n, -256, 255
+    EQUB LO((n * n) DIV 4)
+NEXT
+.SQ_HI
+FOR n, -256, 255
+    EQUB HI((n * n) DIV 4)
+NEXT
+.SINE_LO
+FOR a, 0, 511
+    EQUB LO(INT(2032 * SIN(2 * PI * a / 256) + 0.5 + 65536))
+NEXT
+.SINE_HI
+FOR a, 0, 511
+    EQUB HI(INT(2032 * SIN(2 * PI * a / 256) + 0.5 + 65536))
+NEXT
+
+
+\ ---------------------------------------------------------------------------
+\ mul8s: signed 8 x 8 -> 16 bits by quarter squares.
+\
+\ a*b = f(a+b) - f(b-a). With Y = b + 128, f(a+b) is at SQ_LO + (a + 128) + Y
+\ and f(b-a) at SQ_LO + (128 - a) + 128 + Y - 128 -- so a goes into the base
+\ addresses and b is the index: the 9-bit sums come from the indexing.
+\
+\ In: A = a, Y = b, signed. Out: A = the high byte of a*b, X = the low.
+\ Uses Y.
+
+.mul8s
+{
+    eor #&80                    \ a + 128
+    sta sum_lo + 1
+    sta sum_hi + 1
+    eor #&FF
+    clc
+    adc #1                      \ 256 - (a + 128) = 128 - a: 256 if a = -128
+    sta diff_lo + 1
+    sta diff_hi + 1
+    lda #HI(SQ_LO)
+    adc #0
+    sta diff_lo + 2
+    adc #2
+    sta diff_hi + 2
+    tya
+    eor #&80
+    tay                         \ Y = b + 128
+    sec
+.sum_lo
+    lda SQ_LO, Y
+.diff_lo
+    sbc SQ_LO, Y
+    tax
+.sum_hi
+    lda SQ_HI, Y
+.diff_hi
+    sbc SQ_HI, Y
+    rts
+}
+
+
+\ ---------------------------------------------------------------------------
+\ make_matrix: the rotation Rz Ry Rx for angle_x, angle_y, angle_z, without a
+\ single multiplication.
+\
+\ Every entry of Rz(z) Ry(y) Rx(x) is a product of two or three sines and
+\ cosines, and each such product is a sum of sines of sums of the angles:
+\ cos A cos B = (cos(A-B) + cos(A+B)) / 2, and its relatives. So each entry is
+\ at most four sines of sums plus twice two more -- a minus sign is half a
+\ turn more, a cosine a quarter, both only a different base. The sum is
+\ 4 * 2032 times the entry, and (sum + 32) >> 6 is the entry with 127 for
+\ 1.0, rounded once, never past 127.
+\
+\ The entries go into `matrix` (row by row, signed bytes) and, as the low
+\ bytes of the table addresses each product reads, into rotate's code.
+\ Uses A, X.
+
+MACRO SINE_LOAD phase           \ acc = SINE(A + phase)
+    tax
+    lda SINE_LO + phase, X
+    sta acc
+    lda SINE_HI + phase, X
+    sta acc + 1
+ENDMACRO
+
+MACRO SINE_ADD phase            \ acc += SINE(A + phase)
+    tax
+    lda SINE_LO + phase, X
+    clc
+    adc acc
+    sta acc
+    lda SINE_HI + phase, X
+    adc acc + 1
+    sta acc + 1
+ENDMACRO
+
+MACRO DOUBLE
+    asl acc
+    rol acc + 1
+ENDMACRO
+
+\ acc = the sum: round it to the entry, keep it, and write rotate's addresses:
+\ SQ_LO + m + 128 for f(v + m), SQ_LO + 128 - m for f(v - m).
+MACRO ENTRY index, sum_lo, sum_hi, diff_lo, diff_hi
+    lda acc
+    clc
+    adc #32
+    sta acc
+    lda acc + 1
+    adc #0
+    asl acc
+    rol a
+    asl acc
+    rol a                       \ A = (sum + 32) >> 6
+    sta matrix + index
+    eor #&80
+    sta sum_lo + 1
+    sta sum_hi + 1
+    eor #&FF
+    clc
+    adc #1
+    sta diff_lo + 1
+    sta diff_hi + 1
+ENDMACRO
+
+.make_matrix
+    \ m00 = cy cz = 2 [c(y-z) + c(y+z)]
+    lda angle_y
+    sec
+    sbc angle_z
+    SINE_LOAD 64
+    lda angle_y
+    clc
+    adc angle_z
+    SINE_ADD 64
+    DOUBLE
+    ENTRY 0, m00_sum_lo, m00_sum_hi, m00_diff_lo, m00_diff_hi
+
+    \ m01 = sx sy cz - cx sz
+    \     = -2 [s(z+x) + s(z-x)] + c(x-y-z) + c(x-y+z) - c(x+y-z) - c(x+y+z)
+    lda angle_z
+    clc
+    adc angle_x
+    SINE_LOAD 128
+    lda angle_z
+    sec
+    sbc angle_x
+    SINE_ADD 128
+    DOUBLE
+    lda angle_x
+    sec
+    sbc angle_y
+    sec
+    sbc angle_z
+    SINE_ADD 64
+    lda angle_x
+    sec
+    sbc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 64
+    lda angle_x
+    clc
+    adc angle_y
+    sec
+    sbc angle_z
+    SINE_ADD 192
+    lda angle_x
+    clc
+    adc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 192
+    ENTRY 1, m01_sum_lo, m01_sum_hi, m01_diff_lo, m01_diff_hi
+
+    \ m02 = cx sy cz + sx sz
+    \     = 2 [c(x-z) - c(x+z)] + s(x+y+z) + s(x+y-z) - s(x-y+z) - s(x-y-z)
+    lda angle_x
+    sec
+    sbc angle_z
+    SINE_LOAD 64
+    lda angle_x
+    clc
+    adc angle_z
+    SINE_ADD 192
+    DOUBLE
+    lda angle_x
+    clc
+    adc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 0
+    lda angle_x
+    clc
+    adc angle_y
+    sec
+    sbc angle_z
+    SINE_ADD 0
+    lda angle_x
+    sec
+    sbc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 128
+    lda angle_x
+    sec
+    sbc angle_y
+    sec
+    sbc angle_z
+    SINE_ADD 128
+    ENTRY 2, m02_sum_lo, m02_sum_hi, m02_diff_lo, m02_diff_hi
+
+    \ m10 = cy sz = 2 [s(z+y) + s(z-y)]
+    lda angle_z
+    clc
+    adc angle_y
+    SINE_LOAD 0
+    lda angle_z
+    sec
+    sbc angle_y
+    SINE_ADD 0
+    DOUBLE
+    ENTRY 3, m10_sum_lo, m10_sum_hi, m10_diff_lo, m10_diff_hi
+
+    \ m11 = sx sy sz + cx cz
+    \     = 2 [c(x-z) + c(x+z)] + s(z+x-y) + s(z-x+y) - s(z+x+y) - s(z-x-y)
+    lda angle_x
+    sec
+    sbc angle_z
+    SINE_LOAD 64
+    lda angle_x
+    clc
+    adc angle_z
+    SINE_ADD 64
+    DOUBLE
+    lda angle_x
+    sec
+    sbc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 0
+    lda angle_y
+    sec
+    sbc angle_x
+    clc
+    adc angle_z
+    SINE_ADD 0
+    lda angle_x
+    clc
+    adc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 128
+    lda angle_z
+    sec
+    sbc angle_x
+    sec
+    sbc angle_y
+    SINE_ADD 128
+    ENTRY 4, m11_sum_lo, m11_sum_hi, m11_diff_lo, m11_diff_hi
+
+    \ m12 = cx sy sz - sx cz
+    \     = -2 [s(x+z) + s(x-z)] + c(x+y-z) - c(x+y+z) - c(x-y-z) + c(x-y+z)
+    lda angle_x
+    clc
+    adc angle_z
+    SINE_LOAD 128
+    lda angle_x
+    sec
+    sbc angle_z
+    SINE_ADD 128
+    DOUBLE
+    lda angle_x
+    clc
+    adc angle_y
+    sec
+    sbc angle_z
+    SINE_ADD 64
+    lda angle_x
+    clc
+    adc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 192
+    lda angle_x
+    sec
+    sbc angle_y
+    sec
+    sbc angle_z
+    SINE_ADD 192
+    lda angle_x
+    sec
+    sbc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 64
+    ENTRY 5, m12_sum_lo, m12_sum_hi, m12_diff_lo, m12_diff_hi
+
+    \ m20 = -sy = -4 s(y)
+    lda angle_y
+    SINE_LOAD 128
+    DOUBLE
+    DOUBLE
+    ENTRY 6, m20_sum_lo, m20_sum_hi, m20_diff_lo, m20_diff_hi
+
+    \ m21 = sx cy = 2 [s(x+y) + s(x-y)]
+    lda angle_x
+    clc
+    adc angle_y
+    SINE_LOAD 0
+    lda angle_x
+    sec
+    sbc angle_y
+    SINE_ADD 0
+    DOUBLE
+    ENTRY 7, m21_sum_lo, m21_sum_hi, m21_diff_lo, m21_diff_hi
+
+    \ m22 = cx cy = 2 [c(x-y) + c(x+y)]
+    lda angle_x
+    sec
+    sbc angle_y
+    SINE_LOAD 64
+    lda angle_x
+    clc
+    adc angle_y
+    SINE_ADD 64
+    DOUBLE
+    ENTRY 8, m22_sum_lo, m22_sum_hi, m22_diff_lo, m22_diff_hi
+    rts
+
+.matrix
+    SKIP 9                      \ m00 m01 m02 m10 ... m22
+
+
+\ ---------------------------------------------------------------------------
+\ rotate: the vertex at vptr by the matrix make_matrix last made.
+\
+\ Each product m*v is f(v+m) - f(v-m), as in mul8s, but the matrix only
+\ changes once a frame, so make_matrix has written m into the base addresses
+\ below, and the vertex (+ 128) is the index: four reads a product, and no
+\ address to work out.
+\
+\ In: vptr -> the vertex, three signed bytes x, y, z.
+\ Out: rot_x, rot_y, rot_z, the 16-bit sums M v. Uses A, X, Y.
+
+MACRO ADD_PRODUCT                 \ A, X = a product's high and low byte: add it on
+    tay
+    txa
+    clc
+    adc acc
+    sta acc
+    tya
+    adc acc + 1
+    sta acc + 1
+ENDMACRO
+
+MACRO SUM_PRODUCTS out             \ ... and the sum is the result
+    tay
+    txa
+    clc
+    adc acc
+    sta out
+    tya
+    adc acc + 1
+    sta out + 1
+ENDMACRO
+
+.rotate
+    ldy #0
+    lda (vptr), Y
+    eor #&80
+    sta vx
+    iny
+    lda (vptr), Y
+    eor #&80
+    sta vy
+    iny
+    lda (vptr), Y
+    eor #&80
+    sta vz
+
+    \ rot_x = m00 x + m01 y + m02 z
+    ldy vx
+    sec
+.m00_sum_lo     lda SQ_LO + 128, Y
+.m00_diff_lo    sbc SQ_LO + 128, Y
+    sta acc
+.m00_sum_hi     lda SQ_HI + 128, Y
+.m00_diff_hi    sbc SQ_HI + 128, Y
+    sta acc + 1
+    ldy vy
+    sec
+.m01_sum_lo     lda SQ_LO + 128, Y
+.m01_diff_lo    sbc SQ_LO + 128, Y
+    tax
+.m01_sum_hi     lda SQ_HI + 128, Y
+.m01_diff_hi    sbc SQ_HI + 128, Y
+    ADD_PRODUCT
+    ldy vz
+    sec
+.m02_sum_lo     lda SQ_LO + 128, Y
+.m02_diff_lo    sbc SQ_LO + 128, Y
+    tax
+.m02_sum_hi     lda SQ_HI + 128, Y
+.m02_diff_hi    sbc SQ_HI + 128, Y
+    SUM_PRODUCTS rot_x
+
+    \ rot_y = m10 x + m11 y + m12 z
+    ldy vx
+    sec
+.m10_sum_lo     lda SQ_LO + 128, Y
+.m10_diff_lo    sbc SQ_LO + 128, Y
+    sta acc
+.m10_sum_hi     lda SQ_HI + 128, Y
+.m10_diff_hi    sbc SQ_HI + 128, Y
+    sta acc + 1
+    ldy vy
+    sec
+.m11_sum_lo     lda SQ_LO + 128, Y
+.m11_diff_lo    sbc SQ_LO + 128, Y
+    tax
+.m11_sum_hi     lda SQ_HI + 128, Y
+.m11_diff_hi    sbc SQ_HI + 128, Y
+    ADD_PRODUCT
+    ldy vz
+    sec
+.m12_sum_lo     lda SQ_LO + 128, Y
+.m12_diff_lo    sbc SQ_LO + 128, Y
+    tax
+.m12_sum_hi     lda SQ_HI + 128, Y
+.m12_diff_hi    sbc SQ_HI + 128, Y
+    SUM_PRODUCTS rot_y
+
+    \ rot_z = m20 x + m21 y + m22 z
+    ldy vx
+    sec
+.m20_sum_lo     lda SQ_LO + 128, Y
+.m20_diff_lo    sbc SQ_LO + 128, Y
+    sta acc
+.m20_sum_hi     lda SQ_HI + 128, Y
+.m20_diff_hi    sbc SQ_HI + 128, Y
+    sta acc + 1
+    ldy vy
+    sec
+.m21_sum_lo     lda SQ_LO + 128, Y
+.m21_diff_lo    sbc SQ_LO + 128, Y
+    tax
+.m21_sum_hi     lda SQ_HI + 128, Y
+.m21_diff_hi    sbc SQ_HI + 128, Y
+    ADD_PRODUCT
+    ldy vz
+    sec
+.m22_sum_lo     lda SQ_LO + 128, Y
+.m22_diff_lo    sbc SQ_LO + 128, Y
+    tax
+.m22_sum_hi     lda SQ_HI + 128, Y
+.m22_diff_hi    sbc SQ_HI + 128, Y
+    SUM_PRODUCTS rot_z
+    rts
+
+
+\ ---------------------------------------------------------------------------
+\ project: the rotated vertex onto the screen, by perspective.
+\
+\ Z = (rot_z + zoff) DIV 256, and the vertex lands rot_x / Z right of the
+\ screen's centre and rot_y / Z above it. The object must keep in front of
+\ the eye, with Z 1..255.
+\
+\ In: rot_x, rot_y, rot_z, zoff. Out: screen_x 0..255, screen_y 0..254
+\ downwards, carry clear -- or carry set if the vertex is off the screen, or
+\ Z is 0. Uses A, X.
+
+.project
+{
+    clc
+    lda rot_z
+    adc zoff
+    lda rot_z + 1
+    adc zoff + 1
+    beq off                     \ Z = 0: at or behind the eye
+    sta div_by
+
+    lda rot_y
+    sta div_lo
+    lda rot_y + 1
+    bmi y_negative
+    jsr divide_unsigned
+    bcs off
+    cmp #SCREEN_CENTRE_Y + 1
+    bcs off                     \ above the top
+    eor #&FF
+    adc #SCREEN_CENTRE_Y + 1    \ (carry clear) centre - q
+    jmp y_done
+.y_negative
+    jsr negate
+    jsr divide_unsigned
+    bcs off
+    adc #SCREEN_CENTRE_Y        \ (carry clear) centre + q
+    bcs off
+    cmp #SCREEN_HEIGHT
+    bcs off                     \ below the bottom
+.y_done
+    sta screen_y
+
+    lda rot_x
+    sta div_lo
+    lda rot_x + 1
+    bmi x_negative
+    jsr divide_unsigned
+    bcs off
+    adc #SCREEN_CENTRE_X        \ (carry clear) centre + q
+    bcs off                     \ past the right
+    sta screen_x
+    rts                         \ carry clear
+.x_negative
+    jsr negate
+    jsr divide_unsigned
+    bcs off
+    cmp #SCREEN_CENTRE_X + 1
+    bcs off                     \ past the left
+    eor #&FF
+    adc #SCREEN_CENTRE_X + 1    \ (carry clear) centre - q
+    sta screen_x
+    clc
+    rts
+.off
+    sec
+    rts
+
+\ A, div_lo = -(A, div_lo)
+.negate
+    eor #&FF
+    tax
+    lda div_lo
+    eor #&FF
+    clc
+    adc #1
+    sta div_lo
+    txa
+    adc #0
+    rts
+}
+
+
+\ ---------------------------------------------------------------------------
+\ divide_unsigned: A = (A, div_lo) DIV div_by, a byte, carry clear -- or
+\ carry set if the quotient would not fit, A >= div_by. Uses div_lo.
+
+.divide_unsigned
+{
+    cmp div_by
+    bcs done                    \ more than 255
+    asl div_lo
+    FOR bit, 1, 8               \ the remainder in A takes the dividend's next
+        rol a                   \ bit; the quotient's goes into div_lo
+        bcs subtract            \ past 255: at least div_by
+        cmp div_by
+        bcc next
+    .subtract
+        sbc div_by
+        sec
+    .next
+        rol div_lo
+    NEXT
+    lda div_lo
+    clc
+.done
+    rts
+}
+
+
+\ ---------------------------------------------------------------------------
+\ transform: a list of vertices from the object to the screen: rotate, then
+\ project, for each.
+\
+\ In: vptr -> the vertices, three signed bytes each; pptr -> where the
+\ points go, two bytes each, x then y; count = how many (1..255).
+\ A vertex off the screen gets y = &FF. Uses A, X, Y; moves vptr and pptr
+\ past the lists.
+
+.transform
+{
+.next
+    jsr rotate
+    lda vptr
+    clc
+    adc #3
+    sta vptr
+    bcc same_page
+    inc vptr + 1
+.same_page
+    jsr project
+    ldy #0
+    lda screen_x
+    sta (pptr), Y
+    iny
+    lda screen_y
+    bcc store
+    lda #&FF                    \ off the screen
+.store
+    sta (pptr), Y
+    lda pptr
+    clc
+    adc #2
+    sta pptr
+    bcc same_page_2
+    inc pptr + 1
+.same_page_2
+    dec count
+    bne next
+    rts
+}
+
+
+\ ---------------------------------------------------------------------------
+\ Lines, on a MODE 4 screen (or any 320 x 256 one-bit mode), in the 256 x 255
+\ window project lands in: the screen's middle 256 columns, 32 pixels in.
+\
+\ draw_line draws by Bresenham, downwards (its ends swapped if need be),
+\ stepping along whichever of x and y the line is longer in. Each of the four
+\ ways it can go is eight blocks, one for each bit of a screen byte, so a
+\ pixel is one LDA/ORA/STA; moving to the next bit is falling into the next
+\ block, and to the next byte, 8 more or less in Y once in eight pixels.
+\
+\ ROW_LO and ROW_HI give each row's address on the screen at SCREEN_A, and
+\ screen_add is added to the high byte: 0 for SCREEN_A, SCREEN_B - SCREEN_A
+\ for the other.
+
+SCREEN_A        =? &3000
+SCREEN_B        =? &5800
+WINDOW_LEFT     = 32            \ bytes: 32 pixels, four character cells
+
+\ Drawing never happens during rotate or project, so it borrows their bytes.
+line_x0     = rot_x             \ draw_line's ends
+line_y0     = rot_x + 1
+line_x1     = rot_y
+line_y1     = rot_y + 1
+line_ptr    = rot_z             \ 2: the row being drawn on
+line_count  = vx                \ pixels left
+line_major  = vy                \ the length along the longer axis
+line_minor  = vz                \ along the shorter
+line_entry  = acc               \ 2: the block the first pixel is in
+screen_add  = FAST3D_ZP + 25    \ 0 for SCREEN_A, else SCREEN_B - SCREEN_A, high bytes
+
+ALIGN &100
+.ROW_LO
+FOR y, 0, 255
+    EQUB LO(SCREEN_A + (y DIV 8) * 320 + (y MOD 8) + WINDOW_LEFT)
+NEXT
+.ROW_HI
+FOR y, 0, 255
+    EQUB HI(SCREEN_A + (y DIV 8) * 320 + (y MOD 8) + WINDOW_LEFT)
+NEXT
+
+\ Down a row from line_ptr. Uses A; keeps X and Y.
+MACRO DOWN_ROW
+    lda line_ptr
+    and #7
+    cmp #7
+    beq next_cell
+    inc line_ptr                \ within the character row: no carry
+    bne done                    \ (always: the low three bits were not 7)
+.next_cell
+    lda line_ptr                \ (carry set) + 313: the next character row
+    adc #LO(312)
+    sta line_ptr
+    lda line_ptr + 1
+    adc #HI(312)
+    sta line_ptr + 1
+.done
+ENDMACRO
+
+\ A pixel of a line longer along x: X is the error.
+MACRO ALONG_X bit, next
+    lda (line_ptr), Y
+    ora #1 << bit
+    sta (line_ptr), Y
+    dec line_count
+    bne more
+    rts
+.more
+    txa
+    sec
+    sbc line_minor
+    tax
+    bcs next
+    adc line_major              \ (carry clear)
+    tax
+    DOWN_ROW
+ENDMACRO
+
+\ A pixel of a line longer along y: every pixel moves down a row; when the
+\ error runs out, one along x, into the next block. self is this block.
+MACRO ALONG_Y bit, self
+    lda (line_ptr), Y
+    ora #1 << bit
+    sta (line_ptr), Y
+    dec line_count
+    bne more
+    rts
+.more
+    DOWN_ROW
+    txa
+    sec
+    sbc line_minor
+    tax
+    bcs self
+    adc line_major              \ (carry clear)
+    tax
+ENDMACRO
+
+\ draw_line: from (line_x0, line_y0) to (line_x1, line_y1), x 0..255,
+\ y 0..254 (draw_line uses the rows' table to 255). Uses A, X, Y.
+.draw_line
+{
+    lda line_y1
+    sec
+    sbc line_y0
+    bcs ordered
+    ldx line_x0                 \ upwards: swap the ends
+    ldy line_x1
+    stx line_x1
+    sty line_x0
+    ldx line_y0
+    ldy line_y1
+    stx line_y1
+    sty line_y0
+    lda line_y1
+    sec
+    sbc line_y0
+.ordered
+    sta line_minor              \ dy, for now
+    ldx #0                      \ X = which loop, x 16
+    lda line_x1
+    sec
+    sbc line_x0
+    bcs right
+    eor #&FF                    \ |dx|
+    adc #1
+    ldx #16
+.right
+    cmp line_minor
+    bcs along_x
+    ldy line_minor              \ along y: major dy, minor dx
+    sta line_minor
+    sty line_major
+    txa
+    ora #32
+    tax
+    jmp lengths
+.along_x
+    sta line_major
+.lengths
+    lda line_x0                 \ the block for x0's bit
+    and #7
+    asl a
+    stx line_entry
+    ora line_entry
+    tax
+    lda line_entries, X
+    sta line_entry
+    lda line_entries + 1, X
+    sta line_entry + 1
+    ldx line_y0                 \ the row's address
+    lda ROW_LO, X
+    sta line_ptr
+    lda ROW_HI, X
+    clc
+    adc screen_add
+    sta line_ptr + 1
+    lda line_x0
+    and #&F8
+    tay                         \ Y = the byte in the row
+    ldx line_major
+    inx
+    stx line_count              \ major + 1 pixels (256 is 0)
+    lda line_major
+    lsr a
+    tax                         \ the error starts at half the major length
+    jmp (line_entry)
+}
+
+.line_entries
+    EQUW right_x7, right_x6, right_x5, right_x4, right_x3, right_x2, right_x1, right_x0
+    EQUW left_x7, left_x6, left_x5, left_x4, left_x3, left_x2, left_x1, left_x0
+    EQUW right_y7, right_y6, right_y5, right_y4, right_y3, right_y2, right_y1, right_y0
+    EQUW left_y7, left_y6, left_y5, left_y4, left_y3, left_y2, left_y1, left_y0
+
+.right_x7   ALONG_X 7, right_x6
+.right_x6   ALONG_X 6, right_x5
+.right_x5   ALONG_X 5, right_x4
+.right_x4   ALONG_X 4, right_x3
+.right_x3   ALONG_X 3, right_x2
+.right_x2   ALONG_X 2, right_x1
+.right_x1   ALONG_X 1, right_x0
+.right_x0   ALONG_X 0, right_x_byte
+.right_x_byte
+    tya
+    clc
+    adc #8
+    tay
+    jmp right_x7
+
+.left_x0    ALONG_X 0, left_x1
+.left_x1    ALONG_X 1, left_x2
+.left_x2    ALONG_X 2, left_x3
+.left_x3    ALONG_X 3, left_x4
+.left_x4    ALONG_X 4, left_x5
+.left_x5    ALONG_X 5, left_x6
+.left_x6    ALONG_X 6, left_x7
+.left_x7    ALONG_X 7, left_x_byte
+.left_x_byte
+    tya
+    sec
+    sbc #8
+    tay
+    jmp left_x0
+
+.right_y7   ALONG_Y 7, right_y7
+.right_y6   ALONG_Y 6, right_y6
+.right_y5   ALONG_Y 5, right_y5
+.right_y4   ALONG_Y 4, right_y4
+.right_y3   ALONG_Y 3, right_y3
+.right_y2   ALONG_Y 2, right_y2
+.right_y1   ALONG_Y 1, right_y1
+.right_y0   ALONG_Y 0, right_y0
+    tya
+    clc
+    adc #8
+    tay
+    jmp right_y7
+
+.left_y0    ALONG_Y 0, left_y0
+.left_y1    ALONG_Y 1, left_y1
+.left_y2    ALONG_Y 2, left_y2
+.left_y3    ALONG_Y 3, left_y3
+.left_y4    ALONG_Y 4, left_y4
+.left_y5    ALONG_Y 5, left_y5
+.left_y6    ALONG_Y 6, left_y6
+.left_y7    ALONG_Y 7, left_y7
+    tya
+    sec
+    sbc #8
+    tay
+    jmp left_y0
+
+
+\ ---------------------------------------------------------------------------
+\ clear_box: blank character rows A..A+X-1 (0..31, in the window), byte
+\ columns line_x0..line_x0+line_x1-1 (0..31). Each character row's part of a
+\ column is 8 bytes in a row, so a row's box is one run of bytes.
+\ Uses A, X, Y, line_ptr.
+
+.clear_box
+{
+    stx line_count
+    asl a
+    asl a
+    asl a
+    tax                         \ X = the first pixel row
+    lda line_x0
+    asl a
+    asl a
+    asl a
+    clc
+    adc ROW_LO, X               \ (line_x0 * 8 + the row's low byte)
+    sta line_ptr
+    lda ROW_HI, X
+    adc screen_add
+    sta line_ptr + 1
+    lda line_x1
+    asl a
+    asl a
+    asl a
+    sta line_major              \ bytes a row: 8..248, or 0 for 256
+.row
+    ldy line_major
+    lda #0
+    dey
+.byte
+    sta (line_ptr), Y
+    dey
+    bne byte
+    sta (line_ptr), Y
+    lda line_ptr
+    clc
+    adc #LO(320)
+    sta line_ptr
+    lda line_ptr + 1
+    adc #HI(320)
+    sta line_ptr + 1
+    dec line_count
+    bne row
+    rts
+}

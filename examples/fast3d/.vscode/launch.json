@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "bbcmicro",
+      "request": "launch",
+      "name": "BBC Micro: fast3d demo",
+      "preLaunchTask": "beebasm: fast3d",
+      "program": "${workspaceFolder}/build/fast3d.ssd",
+      "debugInfo": ["${workspaceFolder}/build/demo.labels", "${workspaceFolder}/build/demo.lst"],
+      "source": "${workspaceFolder}/demo.6502"
+    },
+    {
+      "type": "bbcmicro",
+      "request": "launch",
+      "name": "BBC Micro: fast3d demo (prebuilt)",
+      "program": "${workspaceFolder}/build/fast3d.ssd",
+      "debugInfo": ["${workspaceFolder}/build/demo.labels", "${workspaceFolder}/build/demo.lst"],
+      "source": "${workspaceFolder}/demo.6502"
+    }
+  ]
+}

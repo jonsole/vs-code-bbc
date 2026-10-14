@@ -1,0 +1,359 @@
+\ demo.6502 -- fast3d's demo: a wireframe cube or icosahedron, turning about
+\ all three axes, in MODE 4. SPACE changes the object.
+\
+\ Build: beebasm -i demo.6502 -do build/fast3d.ssd -boot DEMO -v -dd -labels build/demo.labels > build/demo.lst
+\ (from this directory)
+\
+\ Each frame is drawn on the screen not being shown -- MODE 4's own at &5800,
+\ or a second at &3000 -- then shown at the next vertical sync by moving the
+\ CRTC's start address, so nothing ever flickers. Only the box the object
+\ took on that screen last time is cleared first.
+\
+\ Program and tables run from &0E00 to below &3000. DEMO loads at &1900, as
+\ a disc file must, and its first act is to copy itself down: the disc
+\ filing system's workspace there is not needed again.
+
+oswrch = &FFEE
+osbyte = &FFF4
+crtc_address = &FE00
+crtc_data = &FE01
+
+FAST3D_ZP = &70                 \ &70..&89; the demo's own after
+object = &8A                    \ 2: -> the object being shown, in `objects`
+space_was = &8C
+
+SCREEN_A = &3000                \ the second screen; MODE 4's own is SCREEN_B
+SCREEN_B = &5800
+LOAD_AT = &1900
+RUN_AT = &0E00
+DISTANCE = 400                  \ the eye from the object's centre
+
+ORG RUN_AT
+GUARD SCREEN_A
+
+INCLUDE "fast3d.6502"     \ first: BeebAsm needs its zero page defined before use
+
+\ draw_frame borrows fast3d's zero page while its routines are idle.
+edge_ptr = div_lo               \ 2: draw_line does not divide
+edges_left = vptr
+extent = rot_x                  \ 4: the least x, most x, least y, most y
+
+.start
+{
+    lda #22                     \ MODE 4, its cursor off
+    jsr oswrch
+    lda #4
+    jsr oswrch
+    ldx #0
+.vdu
+    lda cursor_off, X
+    jsr oswrch
+    inx
+    cpx #10
+    bne vdu
+    lda #0                      \ the second screen blank
+    sta line_ptr
+    lda #HI(SCREEN_A)
+    sta line_ptr + 1
+    ldx #HI(SCREEN_B - SCREEN_A)
+    lda #0
+    tay
+.blank
+    sta (line_ptr), Y
+    iny
+    bne blank
+    inc line_ptr + 1
+    dex
+    bne blank
+    lda #LO(DISTANCE * 128)
+    sta zoff
+    lda #HI(DISTANCE * 128)
+    sta zoff + 1
+    lda #0                      \ MODE 4 shows &5800: draw on &3000 first
+    sta screen_add
+    sta space_was
+    lda #LO(objects)
+    sta object
+    lda #HI(objects)
+    sta object + 1
+    lda #0
+    sta angle_x
+    sta angle_y
+    sta angle_z
+
+.frame
+    jsr draw_frame
+    lda #19                     \ wait for the vertical sync
+    jsr osbyte
+    lda screen_add              \ show what was just drawn; draw on the other
+    bne show_b
+    ldx #HI(SCREEN_A DIV 8)
+    lda #HI(SCREEN_B - SCREEN_A)
+    bne show
+.show_b
+    ldx #HI(SCREEN_B DIV 8)
+    lda #0
+.show
+    sta screen_add
+    lda #12
+    sta crtc_address
+    stx crtc_data
+    lda #13
+    sta crtc_address
+    lda #0
+    sta crtc_data
+    jsr read_space
+    jmp frame
+
+.cursor_off
+    EQUB 23, 1, 0, 0, 0, 0, 0, 0, 0, 0
+}
+
+
+\ draw_frame: turn the object on, and draw it on the screen screen_add says,
+\ clearing what it drew there last time. Calls nothing in the OS.
+.draw_frame
+{
+    inc angle_x                 \ turn a little about each axis
+    inc angle_y
+    inc angle_y
+    inc angle_z
+    jsr make_matrix
+
+    ldy #0                      \ the vertices to the screen
+    lda (object), Y
+    sta vptr
+    iny
+    lda (object), Y
+    sta vptr + 1
+    iny
+    lda (object), Y
+    sta count
+    lda #LO(points)
+    sta pptr
+    lda #HI(points)
+    sta pptr + 1
+    jsr transform
+
+    ldx #0                      \ clear the last box here
+    lda screen_add
+    beq this_box
+    ldx #4
+.this_box
+    lda boxes, X                \ rows: none, nothing to clear
+    beq cleared
+    pha
+    lda boxes + 2, X
+    sta line_x0
+    lda boxes + 3, X
+    sta line_x1
+    lda boxes + 1, X
+    tay
+    pla
+    tax
+    tya
+    jsr clear_box
+.cleared
+
+    ldy #3                      \ the edges
+    lda (object), Y
+    sta edge_ptr
+    iny
+    lda (object), Y
+    sta edge_ptr + 1
+    iny
+    lda (object), Y
+    sta edges_left
+.edge
+    ldy #0
+    lda (edge_ptr), Y
+    asl a
+    tax
+    lda points, X
+    sta line_x0
+    lda points + 1, X
+    sta line_y0
+    iny
+    lda (edge_ptr), Y
+    asl a
+    tax
+    lda points, X
+    sta line_x1
+    lda points + 1, X
+    sta line_y1
+    cmp #&FF                    \ either end off the screen: leave it out
+    beq next
+    lda line_y0
+    cmp #&FF
+    beq next
+    jsr draw_line
+.next
+    lda edge_ptr
+    clc
+    adc #2
+    sta edge_ptr
+    bcc same_page
+    inc edge_ptr + 1
+.same_page
+    dec edges_left
+    bne edge
+
+    \ this screen's box, for next time: round the points on it
+    lda #&FF
+    sta extent                  \ least x
+    sta extent + 2              \ least y
+    lda #0
+    sta extent + 1              \ most x
+    sta extent + 3              \ most y
+    ldy #2
+    lda (object), Y
+    asl a
+    tay                         \ Y = 2 * vertices
+.point
+    dey
+    lda points, Y               \ y
+    cmp #&FF
+    beq off
+    cmp extent + 2
+    bcs not_least_y
+    sta extent + 2
+.not_least_y
+    cmp extent + 3
+    bcc not_most_y
+    sta extent + 3
+.not_most_y
+    lda points - 1, Y           \ x
+    cmp extent
+    bcs not_least_x
+    sta extent
+.not_least_x
+    cmp extent + 1
+    bcc not_most_x
+    sta extent + 1
+.not_most_x
+.off
+    dey
+    bne point
+
+    ldx #0
+    lda screen_add
+    beq that_box
+    ldx #4
+.that_box
+    lda extent + 2
+    cmp #&FF
+    bne some
+    lda #0                      \ nothing on the screen
+    sta boxes, X
+    rts
+.some
+    lsr a                       \ character rows
+    lsr a
+    lsr a
+    sta boxes + 1, X
+    lda extent + 3
+    lsr a
+    lsr a
+    lsr a
+    sec
+    sbc boxes + 1, X
+    clc
+    adc #1
+    sta boxes, X
+    lda extent                  \ byte columns
+    lsr a
+    lsr a
+    lsr a
+    sta boxes + 2, X
+    lda extent + 1
+    lsr a
+    lsr a
+    lsr a
+    sec
+    sbc boxes + 2, X
+    clc
+    adc #1
+    sta boxes + 3, X
+    rts
+}
+
+\ The box (character rows, top row, left column, columns) each screen's
+\ object took: &3000's, then &5800's.
+.boxes
+    EQUB 0, 0, 0, 0
+    EQUB 0, 0, 0, 0
+
+
+\ read_space: SPACE, newly down, changes the object.
+.read_space
+{
+    lda #129                    \ INKEY(-99)
+    ldx #&9D
+    ldy #&FF
+    jsr osbyte
+    txa
+    and #1
+    cmp space_was
+    beq done
+    sta space_was
+    tax                         \ (STA sets no flags)
+    beq done                    \ it has come up
+    lda object
+    clc
+    adc #OBJECT_SIZE
+    cmp #LO(objects_end)
+    bne set
+    lda #LO(objects)
+.set
+    sta object
+.done
+    rts
+}
+
+\ Each object: its vertices and how many, its edges and how many.
+OBJECT_SIZE = 6
+.objects
+    EQUW cube_vertices
+    EQUB CUBE_VERTICES
+    EQUW cube_edges
+    EQUB CUBE_EDGES
+    EQUW icosahedron_vertices
+    EQUB ICOSAHEDRON_VERTICES
+    EQUW icosahedron_edges
+    EQUB ICOSAHEDRON_EDGES
+.objects_end
+ASSERT HI(objects) = HI(objects_end)    \ read_space steps the low byte alone
+
+INCLUDE "objects.6502"
+
+.points
+    SKIP 2 * 128                \ x, y for each vertex
+
+\ Where DEMO lands, it copies itself to RUN_AT and starts. Only relative
+\ branches and zero page here, so it runs wherever it was loaded.
+.relocate
+{
+    lda #LO(LOAD_AT)
+    sta &70
+    lda #HI(LOAD_AT)
+    sta &71
+    lda #LO(RUN_AT)
+    sta &72
+    lda #HI(RUN_AT)
+    sta &73
+    ldx #HI(end - RUN_AT + 255)
+    ldy #0
+.copy
+    lda (&70), Y
+    sta (&72), Y
+    iny
+    bne copy
+    inc &71
+    inc &73
+    dex
+    bne copy
+    jmp start
+}
+.end
+
+SAVE "DEMO", RUN_AT, end, relocate - RUN_AT + LOAD_AT, LOAD_AT
