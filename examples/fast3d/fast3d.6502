@@ -1,0 +1,662 @@
+\ fast3d.6502 -- fast 3D for the 6502, for BeebAsm: signed multiplication, a
+\ rotation matrix from three angles, rotating and projecting vertices.
+\
+\ INCLUDE it anywhere in a program. It aligns its tables itself (2K, on page
+\ boundaries) and uses 25 bytes of zero page from FAST3D_ZP, &70 unless the
+\ program sets it first (or beebasm -D FAST3D_ZP=...).
+\
+\ Numbers, the same as the ZX Spectrum's fast3d (model.mjs has them exactly):
+\ - an angle is a byte, 256 to the turn;
+\ - a vertex is three signed bytes, -128..127;
+\ - a matrix entry is a signed byte, -127..127, with 127 for 1.0;
+\ - a rotated coordinate is the exact 16-bit sum m0*x + m1*y + m2*z: 128 times
+\   the rotated vertex's (times 127/128);
+\ - projected, it is rot / Z with Z = (rot_z + zoff) DIV 256: with zoff = 128 d,
+\   256 x / (z + d), an eye d units from the object and 256 from the screen.
+
+FAST3D_ZP =? &70
+
+acc         = FAST3D_ZP + 0     \ 2: make_matrix's sum, rotate's first products
+rot_x       = FAST3D_ZP + 2     \ 2: rotate's results
+rot_y       = FAST3D_ZP + 4     \ 2
+rot_z       = FAST3D_ZP + 6     \ 2
+zoff        = FAST3D_ZP + 8     \ 2: 128 * the eye's distance from the object
+vx          = FAST3D_ZP + 10    \ the vertex being rotated, each + 128
+vy          = FAST3D_ZP + 11
+vz          = FAST3D_ZP + 12
+angle_x     = FAST3D_ZP + 13    \ make_matrix's angles
+angle_y     = FAST3D_ZP + 14
+angle_z     = FAST3D_ZP + 15
+div_lo      = FAST3D_ZP + 16    \ divide's dividend's low byte, then the quotient
+div_by      = FAST3D_ZP + 17    \ and its divisor
+vptr        = FAST3D_ZP + 18    \ 2: -> the vertex rotate reads
+pptr        = FAST3D_ZP + 20    \ 2: -> where transform puts the next point
+count       = FAST3D_ZP + 22    \ transform's vertices still to do
+screen_x    = FAST3D_ZP + 23    \ project's results
+screen_y    = FAST3D_ZP + 24
+
+SCREEN_CENTRE_X = 128           \ the screen project lands on: 256 wide,
+SCREEN_CENTRE_Y = 127           \ 255 high, y downwards
+SCREEN_HEIGHT   = 255
+
+
+\ ---------------------------------------------------------------------------
+\ The tables.
+\
+\ SQ_LO, SQ_HI: floor(n*n/4) for n = -256..255, the quarter squares, at
+\ SQ_LO + 256 + n: a*b = f(a+b) - f(a-b).
+\ SINE_LO, SINE_HI: round(2032 * sin(2 pi a / 256)), twice round, so that a
+\ quarter or half a turn more is only a different base address.
+
+ALIGN &100
+.SQ_LO
+FOR n, -256, 255
+    EQUB LO((n * n) DIV 4)
+NEXT
+.SQ_HI
+FOR n, -256, 255
+    EQUB HI((n * n) DIV 4)
+NEXT
+.SINE_LO
+FOR a, 0, 511
+    EQUB LO(INT(2032 * SIN(2 * PI * a / 256) + 0.5 + 65536))
+NEXT
+.SINE_HI
+FOR a, 0, 511
+    EQUB HI(INT(2032 * SIN(2 * PI * a / 256) + 0.5 + 65536))
+NEXT
+
+
+\ ---------------------------------------------------------------------------
+\ mul8s: signed 8 x 8 -> 16 bits by quarter squares.
+\
+\ a*b = f(a+b) - f(b-a). With Y = b + 128, f(a+b) is at SQ_LO + (a + 128) + Y
+\ and f(b-a) at SQ_LO + (128 - a) + 128 + Y - 128 -- so a goes into the base
+\ addresses and b is the index: the 9-bit sums come from the indexing.
+\
+\ In: A = a, Y = b, signed. Out: A = the high byte of a*b, X = the low.
+\ Uses Y.
+
+.mul8s
+{
+    eor #&80                    \ a + 128
+    sta sum_lo + 1
+    sta sum_hi + 1
+    eor #&FF
+    clc
+    adc #1                      \ 256 - (a + 128) = 128 - a: 256 if a = -128
+    sta diff_lo + 1
+    sta diff_hi + 1
+    lda #HI(SQ_LO)
+    adc #0
+    sta diff_lo + 2
+    adc #2
+    sta diff_hi + 2
+    tya
+    eor #&80
+    tay                         \ Y = b + 128
+    sec
+.sum_lo
+    lda SQ_LO, Y
+.diff_lo
+    sbc SQ_LO, Y
+    tax
+.sum_hi
+    lda SQ_HI, Y
+.diff_hi
+    sbc SQ_HI, Y
+    rts
+}
+
+
+\ ---------------------------------------------------------------------------
+\ make_matrix: the rotation Rz Ry Rx for angle_x, angle_y, angle_z, without a
+\ single multiplication.
+\
+\ Every entry of Rz(z) Ry(y) Rx(x) is a product of two or three sines and
+\ cosines, and each such product is a sum of sines of sums of the angles:
+\ cos A cos B = (cos(A-B) + cos(A+B)) / 2, and its relatives. So each entry is
+\ at most four sines of sums plus twice two more -- a minus sign is half a
+\ turn more, a cosine a quarter, both only a different base. The sum is
+\ 4 * 2032 times the entry, and (sum + 32) >> 6 is the entry with 127 for
+\ 1.0, rounded once, never past 127.
+\
+\ The entries go into `matrix` (row by row, signed bytes) and, as the low
+\ bytes of the table addresses each product reads, into rotate's code.
+\ Uses A, X.
+
+MACRO SINE_LOAD phase           \ acc = SINE(A + phase)
+    tax
+    lda SINE_LO + phase, X
+    sta acc
+    lda SINE_HI + phase, X
+    sta acc + 1
+ENDMACRO
+
+MACRO SINE_ADD phase            \ acc += SINE(A + phase)
+    tax
+    lda SINE_LO + phase, X
+    clc
+    adc acc
+    sta acc
+    lda SINE_HI + phase, X
+    adc acc + 1
+    sta acc + 1
+ENDMACRO
+
+MACRO DOUBLE
+    asl acc
+    rol acc + 1
+ENDMACRO
+
+\ acc = the sum: round it to the entry, keep it, and write rotate's addresses:
+\ SQ_LO + m + 128 for f(v + m), SQ_LO + 128 - m for f(v - m).
+MACRO ENTRY index, sum_lo, sum_hi, diff_lo, diff_hi
+    lda acc
+    clc
+    adc #32
+    sta acc
+    lda acc + 1
+    adc #0
+    asl acc
+    rol a
+    asl acc
+    rol a                       \ A = (sum + 32) >> 6
+    sta matrix + index
+    eor #&80
+    sta sum_lo + 1
+    sta sum_hi + 1
+    eor #&FF
+    clc
+    adc #1
+    sta diff_lo + 1
+    sta diff_hi + 1
+ENDMACRO
+
+.make_matrix
+    \ m00 = cy cz = 2 [c(y-z) + c(y+z)]
+    lda angle_y
+    sec
+    sbc angle_z
+    SINE_LOAD 64
+    lda angle_y
+    clc
+    adc angle_z
+    SINE_ADD 64
+    DOUBLE
+    ENTRY 0, m00_sum_lo, m00_sum_hi, m00_diff_lo, m00_diff_hi
+
+    \ m01 = sx sy cz - cx sz
+    \     = -2 [s(z+x) + s(z-x)] + c(x-y-z) + c(x-y+z) - c(x+y-z) - c(x+y+z)
+    lda angle_z
+    clc
+    adc angle_x
+    SINE_LOAD 128
+    lda angle_z
+    sec
+    sbc angle_x
+    SINE_ADD 128
+    DOUBLE
+    lda angle_x
+    sec
+    sbc angle_y
+    sec
+    sbc angle_z
+    SINE_ADD 64
+    lda angle_x
+    sec
+    sbc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 64
+    lda angle_x
+    clc
+    adc angle_y
+    sec
+    sbc angle_z
+    SINE_ADD 192
+    lda angle_x
+    clc
+    adc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 192
+    ENTRY 1, m01_sum_lo, m01_sum_hi, m01_diff_lo, m01_diff_hi
+
+    \ m02 = cx sy cz + sx sz
+    \     = 2 [c(x-z) - c(x+z)] + s(x+y+z) + s(x+y-z) - s(x-y+z) - s(x-y-z)
+    lda angle_x
+    sec
+    sbc angle_z
+    SINE_LOAD 64
+    lda angle_x
+    clc
+    adc angle_z
+    SINE_ADD 192
+    DOUBLE
+    lda angle_x
+    clc
+    adc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 0
+    lda angle_x
+    clc
+    adc angle_y
+    sec
+    sbc angle_z
+    SINE_ADD 0
+    lda angle_x
+    sec
+    sbc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 128
+    lda angle_x
+    sec
+    sbc angle_y
+    sec
+    sbc angle_z
+    SINE_ADD 128
+    ENTRY 2, m02_sum_lo, m02_sum_hi, m02_diff_lo, m02_diff_hi
+
+    \ m10 = cy sz = 2 [s(z+y) + s(z-y)]
+    lda angle_z
+    clc
+    adc angle_y
+    SINE_LOAD 0
+    lda angle_z
+    sec
+    sbc angle_y
+    SINE_ADD 0
+    DOUBLE
+    ENTRY 3, m10_sum_lo, m10_sum_hi, m10_diff_lo, m10_diff_hi
+
+    \ m11 = sx sy sz + cx cz
+    \     = 2 [c(x-z) + c(x+z)] + s(z+x-y) + s(z-x+y) - s(z+x+y) - s(z-x-y)
+    lda angle_x
+    sec
+    sbc angle_z
+    SINE_LOAD 64
+    lda angle_x
+    clc
+    adc angle_z
+    SINE_ADD 64
+    DOUBLE
+    lda angle_x
+    sec
+    sbc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 0
+    lda angle_y
+    sec
+    sbc angle_x
+    clc
+    adc angle_z
+    SINE_ADD 0
+    lda angle_x
+    clc
+    adc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 128
+    lda angle_z
+    sec
+    sbc angle_x
+    sec
+    sbc angle_y
+    SINE_ADD 128
+    ENTRY 4, m11_sum_lo, m11_sum_hi, m11_diff_lo, m11_diff_hi
+
+    \ m12 = cx sy sz - sx cz
+    \     = -2 [s(x+z) + s(x-z)] + c(x+y-z) - c(x+y+z) - c(x-y-z) + c(x-y+z)
+    lda angle_x
+    clc
+    adc angle_z
+    SINE_LOAD 128
+    lda angle_x
+    sec
+    sbc angle_z
+    SINE_ADD 128
+    DOUBLE
+    lda angle_x
+    clc
+    adc angle_y
+    sec
+    sbc angle_z
+    SINE_ADD 64
+    lda angle_x
+    clc
+    adc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 192
+    lda angle_x
+    sec
+    sbc angle_y
+    sec
+    sbc angle_z
+    SINE_ADD 192
+    lda angle_x
+    sec
+    sbc angle_y
+    clc
+    adc angle_z
+    SINE_ADD 64
+    ENTRY 5, m12_sum_lo, m12_sum_hi, m12_diff_lo, m12_diff_hi
+
+    \ m20 = -sy = -4 s(y)
+    lda angle_y
+    SINE_LOAD 128
+    DOUBLE
+    DOUBLE
+    ENTRY 6, m20_sum_lo, m20_sum_hi, m20_diff_lo, m20_diff_hi
+
+    \ m21 = sx cy = 2 [s(x+y) + s(x-y)]
+    lda angle_x
+    clc
+    adc angle_y
+    SINE_LOAD 0
+    lda angle_x
+    sec
+    sbc angle_y
+    SINE_ADD 0
+    DOUBLE
+    ENTRY 7, m21_sum_lo, m21_sum_hi, m21_diff_lo, m21_diff_hi
+
+    \ m22 = cx cy = 2 [c(x-y) + c(x+y)]
+    lda angle_x
+    sec
+    sbc angle_y
+    SINE_LOAD 64
+    lda angle_x
+    clc
+    adc angle_y
+    SINE_ADD 64
+    DOUBLE
+    ENTRY 8, m22_sum_lo, m22_sum_hi, m22_diff_lo, m22_diff_hi
+    rts
+
+.matrix
+    SKIP 9                      \ m00 m01 m02 m10 ... m22
+
+
+\ ---------------------------------------------------------------------------
+\ rotate: the vertex at vptr by the matrix make_matrix last made.
+\
+\ Each product m*v is f(v+m) - f(v-m), as in mul8s, but the matrix only
+\ changes once a frame, so make_matrix has written m into the base addresses
+\ below, and the vertex (+ 128) is the index: four reads a product, and no
+\ address to work out.
+\
+\ In: vptr -> the vertex, three signed bytes x, y, z.
+\ Out: rot_x, rot_y, rot_z, the 16-bit sums M v. Uses A, X, Y.
+
+MACRO ADD_PRODUCT                 \ A, X = a product's high and low byte: add it on
+    tay
+    txa
+    clc
+    adc acc
+    sta acc
+    tya
+    adc acc + 1
+    sta acc + 1
+ENDMACRO
+
+MACRO SUM_PRODUCTS out             \ ... and the sum is the result
+    tay
+    txa
+    clc
+    adc acc
+    sta out
+    tya
+    adc acc + 1
+    sta out + 1
+ENDMACRO
+
+.rotate
+    ldy #0
+    lda (vptr), Y
+    eor #&80
+    sta vx
+    iny
+    lda (vptr), Y
+    eor #&80
+    sta vy
+    iny
+    lda (vptr), Y
+    eor #&80
+    sta vz
+
+    \ rot_x = m00 x + m01 y + m02 z
+    ldy vx
+    sec
+.m00_sum_lo     lda SQ_LO + 128, Y
+.m00_diff_lo    sbc SQ_LO + 128, Y
+    sta acc
+.m00_sum_hi     lda SQ_HI + 128, Y
+.m00_diff_hi    sbc SQ_HI + 128, Y
+    sta acc + 1
+    ldy vy
+    sec
+.m01_sum_lo     lda SQ_LO + 128, Y
+.m01_diff_lo    sbc SQ_LO + 128, Y
+    tax
+.m01_sum_hi     lda SQ_HI + 128, Y
+.m01_diff_hi    sbc SQ_HI + 128, Y
+    ADD_PRODUCT
+    ldy vz
+    sec
+.m02_sum_lo     lda SQ_LO + 128, Y
+.m02_diff_lo    sbc SQ_LO + 128, Y
+    tax
+.m02_sum_hi     lda SQ_HI + 128, Y
+.m02_diff_hi    sbc SQ_HI + 128, Y
+    SUM_PRODUCTS rot_x
+
+    \ rot_y = m10 x + m11 y + m12 z
+    ldy vx
+    sec
+.m10_sum_lo     lda SQ_LO + 128, Y
+.m10_diff_lo    sbc SQ_LO + 128, Y
+    sta acc
+.m10_sum_hi     lda SQ_HI + 128, Y
+.m10_diff_hi    sbc SQ_HI + 128, Y
+    sta acc + 1
+    ldy vy
+    sec
+.m11_sum_lo     lda SQ_LO + 128, Y
+.m11_diff_lo    sbc SQ_LO + 128, Y
+    tax
+.m11_sum_hi     lda SQ_HI + 128, Y
+.m11_diff_hi    sbc SQ_HI + 128, Y
+    ADD_PRODUCT
+    ldy vz
+    sec
+.m12_sum_lo     lda SQ_LO + 128, Y
+.m12_diff_lo    sbc SQ_LO + 128, Y
+    tax
+.m12_sum_hi     lda SQ_HI + 128, Y
+.m12_diff_hi    sbc SQ_HI + 128, Y
+    SUM_PRODUCTS rot_y
+
+    \ rot_z = m20 x + m21 y + m22 z
+    ldy vx
+    sec
+.m20_sum_lo     lda SQ_LO + 128, Y
+.m20_diff_lo    sbc SQ_LO + 128, Y
+    sta acc
+.m20_sum_hi     lda SQ_HI + 128, Y
+.m20_diff_hi    sbc SQ_HI + 128, Y
+    sta acc + 1
+    ldy vy
+    sec
+.m21_sum_lo     lda SQ_LO + 128, Y
+.m21_diff_lo    sbc SQ_LO + 128, Y
+    tax
+.m21_sum_hi     lda SQ_HI + 128, Y
+.m21_diff_hi    sbc SQ_HI + 128, Y
+    ADD_PRODUCT
+    ldy vz
+    sec
+.m22_sum_lo     lda SQ_LO + 128, Y
+.m22_diff_lo    sbc SQ_LO + 128, Y
+    tax
+.m22_sum_hi     lda SQ_HI + 128, Y
+.m22_diff_hi    sbc SQ_HI + 128, Y
+    SUM_PRODUCTS rot_z
+    rts
+
+
+\ ---------------------------------------------------------------------------
+\ project: the rotated vertex onto the screen, by perspective.
+\
+\ Z = (rot_z + zoff) DIV 256, and the vertex lands rot_x / Z right of the
+\ screen's centre and rot_y / Z above it. The object must keep in front of
+\ the eye, with Z 1..255.
+\
+\ In: rot_x, rot_y, rot_z, zoff. Out: screen_x 0..255, screen_y 0..254
+\ downwards, carry clear -- or carry set if the vertex is off the screen, or
+\ Z is 0. Uses A, X.
+
+.project
+{
+    clc
+    lda rot_z
+    adc zoff
+    lda rot_z + 1
+    adc zoff + 1
+    beq off                     \ Z = 0: at or behind the eye
+    sta div_by
+
+    lda rot_y
+    sta div_lo
+    lda rot_y + 1
+    bmi y_negative
+    jsr divide_unsigned
+    bcs off
+    cmp #SCREEN_CENTRE_Y + 1
+    bcs off                     \ above the top
+    eor #&FF
+    adc #SCREEN_CENTRE_Y + 1    \ (carry clear) centre - q
+    jmp y_done
+.y_negative
+    jsr negate
+    jsr divide_unsigned
+    bcs off
+    adc #SCREEN_CENTRE_Y        \ (carry clear) centre + q
+    bcs off
+    cmp #SCREEN_HEIGHT
+    bcs off                     \ below the bottom
+.y_done
+    sta screen_y
+
+    lda rot_x
+    sta div_lo
+    lda rot_x + 1
+    bmi x_negative
+    jsr divide_unsigned
+    bcs off
+    adc #SCREEN_CENTRE_X        \ (carry clear) centre + q
+    bcs off                     \ past the right
+    sta screen_x
+    rts                         \ carry clear
+.x_negative
+    jsr negate
+    jsr divide_unsigned
+    bcs off
+    cmp #SCREEN_CENTRE_X + 1
+    bcs off                     \ past the left
+    eor #&FF
+    adc #SCREEN_CENTRE_X + 1    \ (carry clear) centre - q
+    sta screen_x
+    clc
+    rts
+.off
+    sec
+    rts
+
+\ A, div_lo = -(A, div_lo)
+.negate
+    eor #&FF
+    tax
+    lda div_lo
+    eor #&FF
+    clc
+    adc #1
+    sta div_lo
+    txa
+    adc #0
+    rts
+}
+
+
+\ ---------------------------------------------------------------------------
+\ divide_unsigned: A = (A, div_lo) DIV div_by, a byte, carry clear -- or
+\ carry set if the quotient would not fit, A >= div_by. Uses div_lo.
+
+.divide_unsigned
+{
+    cmp div_by
+    bcs done                    \ more than 255
+    asl div_lo
+    FOR bit, 1, 8               \ the remainder in A takes the dividend's next
+        rol a                   \ bit; the quotient's goes into div_lo
+        bcs subtract            \ past 255: at least div_by
+        cmp div_by
+        bcc next
+    .subtract
+        sbc div_by
+        sec
+    .next
+        rol div_lo
+    NEXT
+    lda div_lo
+    clc
+.done
+    rts
+}
+
+
+\ ---------------------------------------------------------------------------
+\ transform: a list of vertices from the object to the screen: rotate, then
+\ project, for each.
+\
+\ In: vptr -> the vertices, three signed bytes each; pptr -> where the
+\ points go, two bytes each, x then y; count = how many (1..255).
+\ A vertex off the screen gets y = &FF. Uses A, X, Y; moves vptr and pptr
+\ past the lists.
+
+.transform
+{
+.next
+    jsr rotate
+    lda vptr
+    clc
+    adc #3
+    sta vptr
+    bcc same_page
+    inc vptr + 1
+.same_page
+    jsr project
+    ldy #0
+    lda screen_x
+    sta (pptr), Y
+    iny
+    lda screen_y
+    bcc store
+    lda #&FF                    \ off the screen
+.store
+    sta (pptr), Y
+    lda pptr
+    clc
+    adc #2
+    sta pptr
+    bcc same_page_2
+    inc pptr + 1
+.same_page_2
+    dec count
+    bne next
+    rts
+}

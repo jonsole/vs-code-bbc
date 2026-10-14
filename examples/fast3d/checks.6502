@@ -1,0 +1,14 @@
+\ fast3d's routines alone, at &1900, for check.mjs to run in jsbeeb's 6502.
+\
+\ Build: beebasm -i checks.6502 -dd -labels build/checks.labels
+\ (from this directory; it writes build/checks.bin)
+
+ORG &1900
+.start
+INCLUDE "fast3d.6502"
+.checks_vertices
+    SKIP 3 * 16
+.checks_points
+    SKIP 2 * 16
+.end
+SAVE "build/checks.bin", start, end
