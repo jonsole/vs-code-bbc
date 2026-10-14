@@ -20,9 +20,7 @@ osbyte = &FFF4
 crtc_address = &FE00
 crtc_data = &FE01
 
-FAST3D_ZP = &70                 \ &70..&89; the demo's own after
-object = &8A                    \ 2: -> the object being shown, in `objects`
-space_was = &8C
+FAST3D_ZP = &00                 \ no BASIC: zero page is the demo's own
 
 SCREEN_A = &3000                \ the second screen; MODE 4's own is SCREEN_B
 SCREEN_B = &5800
@@ -40,9 +38,12 @@ GUARD SCREEN_A
 
 INCLUDE "fast3d.6502"     \ first: BeebAsm needs its zero page defined before use
 
-\ draw_frame borrows fast3d's zero page that clip_line and draw_line leave be.
-edge_ptr = div_lo               \ 2
-edges_left = vptr
+object      = FAST3D_ZP + FAST3D_ZP_SIZE    \ 2: -> the object shown, in `objects`
+space_was   = object + 2
+edge_ptr    = object + 3        \ 2: -> draw_frame's next edge
+edges_left  = object + 5
+DEMO_ZP_END = object + 6
+ASSERT DEMO_ZP_END <= &90       \ above that, the OS's
 
 .start
 {
@@ -438,6 +439,10 @@ OBJECT_SIZE = 6
     EQUB ICOSAHEDRON_EDGES
 .objects_end
 ASSERT HI(objects) = HI(objects_end)    \ read_space steps the low byte alone
+
+INCLUDE "zp_map.6502"
+.demo_zp_map
+    EQUB object
 
 INCLUDE "objects.6502"
 

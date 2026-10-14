@@ -3,20 +3,13 @@
 \ drawing lines on a MODE 4 screen.
 \
 \ INCLUDE it anywhere in a program, before code that uses its zero page. It
-\ aligns its tables itself (2.5K, on page boundaries) and uses 26 bytes of
-\ zero page from FAST3D_ZP: &70 unless the program sets it first (or
-\ beebasm -D FAST3D_ZP=...).
+\ aligns its tables itself (2.5K, on page boundaries) and uses FAST3D_ZP_SIZE
+\ (68) bytes of zero page from FAST3D_ZP: &00 unless the program sets it first
+\ (or beebasm -D FAST3D_ZP=...). A machine-code program with no BASIC behind
+\ it has &00..&8F to itself; one that keeps BASIC has only &70..&8F, which is
+\ too little for all of this.
 \
-\ Numbers, the same as the ZX Spectrum's fast3d (model.mjs has them exactly):
-\ - an angle is a byte, 256 to the turn;
-\ - a vertex is three signed bytes, -128..127;
-\ - a matrix entry is a signed byte, -127..127, with 127 for 1.0;
-\ - a rotated coordinate is the exact 16-bit sum m0*x + m1*y + m2*z: 128 times
-\   the rotated vertex's (times 127/128);
-\ - projected, it is rot / Z with Z = (rot_z + zoff) DIV 256: with zoff = 128 d,
-\   256 x / (z + d), an eye d units from the object and 256 from the screen.
-
-FAST3D_ZP =? &70
+FAST3D_ZP =? &00
 
 acc         = FAST3D_ZP + 0     \ 2: make_matrix's sum, rotate's first products
 rot_x       = FAST3D_ZP + 2     \ 2: rotate's results
@@ -983,36 +976,34 @@ OFF_BOTTOM  = 8
 CHOP_BITS   = 7                 \ model.CHOP_BITS
 CHOP_HALF   = 1 << (CHOP_BITS - 1)
 
-\ Clipping never happens during rotate, project or transform, so it borrows
-\ their zero page: three-byte numbers, low byte first.
-chop_r      = rot_x             \ 3: b short of the edge (negative)
-chop_db     = rot_y + 1         \ 3: the step along b
-chop_da     = vx                \ 3: the step along a
-chop_gone   = pptr              \ 3: how far along a, so far, and half a pixel
-chop_n      = screen_x          \ halvings left
-clip_c0     = screen_y          \ the ends' codes
-clip_c1     = acc
-oc_code     = acc + 1
-div_sign    = acc               \ divide_wide's (never while clipping)
-div_hi      = vx
-
-\ The line to clip, 16-bit signed, low byte first: clip_x0, clip_y0,
-\ clip_x1, clip_y1; and the line as it was, while it is clipped.
-.clip_ends
-.clip_x0    SKIP 2
-.clip_y0    SKIP 2
-.clip_x1    SKIP 2
-.clip_y1    SKIP 2
-.clip_line_ends
-.clip_px    SKIP 2
-.clip_py    SKIP 2
-.clip_qx    SKIP 2
-.clip_qy    SKIP 2
-.clip_passes SKIP 1
-.clip_end   SKIP 1
-.chop_ap    SKIP 2
-.wide_x     SKIP 2              \ project_wide's results
-.wide_y     SKIP 2
+\ Clipping's zero page, its own, after the 3D routines' 26 bytes. Three-byte
+\ numbers are low byte first.
+clip_ends   = FAST3D_ZP + 26    \ the line to clip, 16-bit signed, low byte first:
+clip_x0     = FAST3D_ZP + 26    \ 2
+clip_y0     = FAST3D_ZP + 28    \ 2
+clip_x1     = FAST3D_ZP + 30    \ 2
+clip_y1     = FAST3D_ZP + 32    \ 2
+clip_line_ends = FAST3D_ZP + 34 \ and the line as it was, while it is clipped
+clip_px     = FAST3D_ZP + 34    \ 2
+clip_py     = FAST3D_ZP + 36    \ 2
+clip_qx     = FAST3D_ZP + 38    \ 2
+clip_qy     = FAST3D_ZP + 40    \ 2
+chop_r      = FAST3D_ZP + 42    \ 3: b short of the edge (negative)
+chop_db     = FAST3D_ZP + 45    \ 3: the step along b
+chop_da     = FAST3D_ZP + 48    \ 3: the step along a
+chop_gone   = FAST3D_ZP + 51    \ 3: how far along a, so far, and half a pixel
+chop_n      = FAST3D_ZP + 54    \ halvings left
+chop_ap     = FAST3D_ZP + 55    \ 2: a at the line's first end
+clip_c0     = FAST3D_ZP + 57    \ the ends' codes
+clip_c1     = FAST3D_ZP + 58
+oc_code     = FAST3D_ZP + 59
+clip_passes = FAST3D_ZP + 60
+clip_end    = FAST3D_ZP + 61    \ 0 or 4: the end being moved
+wide_x      = FAST3D_ZP + 62    \ 2: project_wide's results
+wide_y      = FAST3D_ZP + 64    \ 2
+div_sign    = FAST3D_ZP + 66    \ divide_wide's
+div_hi      = FAST3D_ZP + 67
+FAST3D_ZP_SIZE = 68
 
 
 \ set_window: lines are clipped to columns line_x0..line_x1 and rows

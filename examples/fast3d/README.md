@@ -11,9 +11,15 @@ data between the two machines.
 
 `INCLUDE "fast3d.6502"` before any code that uses its zero page; BeebAsm
 needs zero-page symbols defined before use. It aligns its tables itself (2.5K,
-on page boundaries). It takes 26 bytes of zero page from `FAST3D_ZP`, which
-is &70 unless you set it first. Clipping borrows bytes of that zero page
-that `rotate` and `project` use, so it must not run in the middle of them.
+on page boundaries).
+
+It takes `FAST3D_ZP_SIZE`, 68 bytes, of zero page from `FAST3D_ZP`. That is
+&00 unless you set it first (or `beebasm -D FAST3D_ZP=...`). A machine-code
+program with no BASIC behind it has &00..&8F to itself; the demo puts its
+own few bytes straight after the library's. The first 26 bytes are the 3D
+routines' and `draw_line`'s, and the other 42 are clipping's own, so
+clipping can run at any time. A program that keeps BASIC has only &70..&8F,
+which is too little for all of it.
 
 ## The numbers
 
@@ -53,8 +59,8 @@ see [Checking](#checking).
 | `divide_wide` | A:`div_lo` signed / `div_by` | A:`div_lo`, held to ±16,383 | 180..599 |
 | `transform_wide` | as `transform` | x, y as 16-bit words; x = &8000 if at or behind the eye | |
 | `set_window` | `line_x0`, `line_y0` = left, top; `line_x1`, `line_y1` = right, bottom | lines clip to that, inclusive | |
-| `clip_line` | `clip_x0`, `clip_y0`, `clip_x1`, `clip_y1`, 16-bit | `line_x0`..`line_y1` for `draw_line`, or carry if none of it is in the window | 192 inside; ~640 outside; ~1,750 cut at one end; ~4,550 at both |
-| `crossing_x`, `crossing_y` | A = the edge; the line's ends | A, Y = where the line crosses it | ~1,310 (742..1,804) |
+| `clip_line` | `clip_x0`, `clip_y0`, `clip_x1`, `clip_y1`, 16-bit | `line_x0`..`line_y1` for `draw_line`, or carry if none of it is in the window | 190 inside; ~640 outside; ~1,720 cut at one end; ~4,490 at both |
+| `crossing_x`, `crossing_y` | A = the edge; the line's ends | A, Y = where the line crosses it | ~1,300 (730..1,790) |
 | `draw_line_clipped` | as `clip_line` | `clip_line`, then `draw_line` | |
 
 ### How they are quick
@@ -80,8 +86,8 @@ see [Checking](#checking).
   binary chop. From one end, a step toward the other is halved again and
   again, and taken whenever the line stays short of the edge: each halving is
   a bit of the division and a step of the multiplication, about 12 of them.
-  The numbers start as 24 bits in zero page, and the last nine halvings,
-  when everything fits 16, skip the third byte. A clipped end is within 0.75
+  The numbers start as 24 bits, all in zero page, and the last nine
+  halvings, when everything fits 16, skip the third byte. A clipped end is within 0.75
   of a pixel of the true line. Every crossing is worked out from the line's
   own ends, never from an end already moved: a moved end has been rounded,
   and on a shallow line the slope would multiply that.
@@ -127,7 +133,9 @@ node examples/fast3d/check.mjs     # after assembling (the build is checked in)
 assembled routines on jsbeeb's own 6502 and compare every result with
 `model.mjs`:
 
-- the tables BeebAsm generated, against the model's;
+- the tables BeebAsm generated, against the model's (and where every
+  zero-page variable is, from `zp_map.6502`, so the checks follow
+  `FAST3D_ZP` wherever it is);
 - `mul8s`, for all 65,536 pairs of signed bytes;
 - `make_matrix`, for 10,960 sets of angles, and `rotate` with each matrix on
   all eight corners of the signed-byte cube and four random vertices:

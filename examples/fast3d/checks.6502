@@ -6,6 +6,7 @@
 ORG &0E00
 .start
 INCLUDE "fast3d.6502"
+INCLUDE "zp_map.6502"
 .checks_vertices
     SKIP 3 * 16
 .checks_points

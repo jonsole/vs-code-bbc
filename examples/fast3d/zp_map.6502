@@ -1,0 +1,8 @@
+\ zp_map.6502 -- where fast3d's zero-page variables are, for check.mjs to
+\ read from the assembled program rather than know: INCLUDE it after
+\ fast3d.6502, in the checks and the demo. The order is check.mjs's ZP_NAMES.
+
+.zp_map
+    EQUB acc, rot_x, rot_y, rot_z, zoff, angle_x, div_lo, div_by
+    EQUB vptr, pptr, count, screen_x, screen_y, screen_add
+    EQUB clip_x0, clip_px, wide_x, wide_y

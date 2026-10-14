@@ -36,8 +36,10 @@ import { encodePng } from "../../server/png.mjs";
 const Here = path.dirname(fileURLToPath(import.meta.url));
 const Build = path.join(Here, "build");
 const RETURN = 0x0d00; // a return address nothing runs
-const ZP = 0x70; // FAST3D_ZP, and the variables at it, as fast3d.6502 has them
-const Zp = { acc: 0, rot_x: 2, rot_y: 4, rot_z: 6, zoff: 8, angle_x: 13, div_lo: 16, div_by: 17, vptr: 18, pptr: 20, count: 22, screen_x: 23, screen_y: 24, screen_add: 25 };
+// fast3d's zero-page variables, in the order zp_map.6502 lists them: where
+// each is, read from the assembled program's zp_map.
+const ZP_NAMES = ["acc", "rot_x", "rot_y", "rot_z", "zoff", "angle_x", "div_lo", "div_by",
+    "vptr", "pptr", "count", "screen_x", "screen_y", "screen_add", "clip_x0", "clip_px", "wide_x", "wide_y"];
 
 /** BeebAsm's -labels dump: [{'.name':valueL,...}] */
 export function readLabels(file) {
@@ -69,7 +71,9 @@ export class Machine {
         bytes.forEach((b, i) => this.cpu.writemem(address + i, b & 0xff));
     }
     zp(name) {
-        return ZP + Zp[name];
+        const index = ZP_NAMES.indexOf(name);
+        if (index < 0) throw new Error(`no zero-page variable ${name} in zp_map`);
+        return this.peek(this.labels.zp_map + index);
     }
     word(address) {
         const value = this.peek(address) | (this.peek(address + 1) << 8);
@@ -355,7 +359,7 @@ function checkClipping(m, failures) {
         ["rot_x", "rot_y", "rot_z"].forEach((n, k) => m.poke(m.zp(n), [rotated[k] & 0xff, (rotated[k] >> 8) & 0xff]));
         m.poke(m.zp("zoff"), [zoff & 0xff, zoff >> 8]);
         times.push(m.call("project_wide"));
-        const got = m.cpu.p.c ? null : [word(m.labels.wide_x), word(m.labels.wide_y)];
+        const got = m.cpu.p.c ? null : [word(m.zp("wide_x")), word(m.zp("wide_y"))];
         const want = model.projectWide(rotated, zoff);
         if (String(got) !== String(want) && failures.length < 10) failures.push(`project_wide ${rotated} zoff ${zoff}: ${got}, not ${want}`);
     }
@@ -394,7 +398,7 @@ function checkClipping(m, failures) {
     };
     for (const [window, line] of windowLines(rnd, 60000)) {
         setWindow(window);
-        m.poke(m.labels.clip_x0, words(line));
+        m.poke(m.zp("clip_x0"), words(line));
         const t = m.call("clip_line");
         const got = m.cpu.p.c ? null : [0, 1, 2, 3].map((k) => m.peek(m.zp("rot_x") + k));
         const want = model.clipLine(...line, window);
@@ -413,7 +417,7 @@ function checkClipping(m, failures) {
     for (const [window, line] of windowLines(rnd, 2000)) {
         m.poke(0x3000, new Array(10240).fill(0));
         setWindow(window);
-        m.poke(m.labels.clip_x0, words(line));
+        m.poke(m.zp("clip_x0"), words(line));
         m.call("draw_line_clipped");
         const clipped = model.clipLine(...line, window);
         if (!sameBytes(screenBytes(m, 0x3000), model.render(clipped ? [clipped] : [], 0x3000))) {
@@ -470,7 +474,8 @@ async function checkDemo(failures, picture) {
     const frames = [];
     for (const [index, { name, vertices, edges }] of readObjects().entries()) {
         const pointer = m.labels.objects + 6 * index;
-        m.poke(0x8a, [pointer & 0xff, pointer >> 8]); // the demo's `object`
+        const object = m.peek(m.labels.demo_zp_map); // the demo's `object`
+        m.poke(object, [pointer & 0xff, pointer >> 8]);
         const times = [];
         let clipped = 0;
         for (let i = 0; i < swing; i++) {
